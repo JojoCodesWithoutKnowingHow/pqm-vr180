@@ -43,6 +43,8 @@ class Options:
     stop_left: float = 0.004     # stop planning views below this much target left;
                                  # the cracks that remain are filled in place
     seed: int = 1234
+    quality: str = prompts.QUALITY   # the checkpoint's quality words (anime by default)
+    negative: str = prompts.NEGATIVE
 
 
 @dataclass
@@ -130,9 +132,9 @@ def widen(src: np.ndarray, fill_tags: list[str], inpaint: Inpainter, opt: Option
         gen_mask = cv2.dilate(unknown.astype(np.uint8) * 255, band)
         gen_mask[sv] = 0
         seeded = _seed(view, unknown)
-        prompt = prompts.view_prompt(fill_tags, where, v.pitch)
+        prompt = prompts.view_prompt(fill_tags, where, v.pitch, opt.quality)
         t0 = time.time()
-        gen = inpaint(seeded, gen_mask, prompt, prompts.NEGATIVE, opt.seed + n)
+        gen = inpaint(seeded, gen_mask, prompt, opt.negative, opt.seed + n)
         secs = time.time() - t0
         w = _feather(gen_mask, unknown, opt.seam_px)
         rows, cols = region = sphere.bounds(v.yaw, v.pitch, F, opt.width)

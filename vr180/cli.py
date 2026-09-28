@@ -38,6 +38,11 @@ def parse(argv=None):
     p.add_argument("--steps", type=int, default=28)
     p.add_argument("--cfg", type=float, default=5.0)
     p.add_argument("--seed", type=int, default=1234)
+    p.add_argument("--quality", default=prompts.QUALITY,
+                   help="quality words the checkpoint expects (default: anime/Illustrious)")
+    p.add_argument("--negative", default=prompts.NEGATIVE)
+    p.add_argument("--sampler", default="Euler a")
+    p.add_argument("--scheduler", default="Automatic")
     p.add_argument("--strength", type=float, default=1.0, help="stereo360's stereo strength")
     p.add_argument("--stereo-python", default="/workspace/venvs/stereo360/bin/python")
     p.add_argument("--stereo-dir", default="/workspace/stereo360")
@@ -57,7 +62,7 @@ def main(argv=None) -> int:
 
     f = forge.Forge(a.forge)
     s = forge.Settings(checkpoint=a.checkpoint, method=a.method, cn_model=a.cn_model,
-                       steps=a.steps, cfg=a.cfg)
+                       steps=a.steps, cfg=a.cfg, sampler=a.sampler, scheduler=a.scheduler)
     missing = f.resolve(s)
     if missing:
         print("not ready: " + "; ".join(missing), file=sys.stderr)
@@ -67,7 +72,8 @@ def main(argv=None) -> int:
         return f.inpaint(image, mask, prompt, negative, seed, s)
 
     opt = widen.Options(width=a.width, long_side=a.long_side, target_deg=a.target,
-                        max_new=a.max_new, seed=a.seed)
+                        max_new=a.max_new, seed=a.seed, quality=a.quality,
+                        negative=a.negative)
     src = np.array(Image.open(a.src).convert("RGB"))
     t0 = time.time()
     r = widen.widen(src, tags, inpaint, opt, work)

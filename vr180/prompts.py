@@ -52,7 +52,8 @@ def setting(tags: list[str]) -> tuple[str | None, str]:
     return None, "no setting in the tags"
 
 
-def view_prompt(tags: list[str], where: str | None, pitch: float) -> str:
+def view_prompt(tags: list[str], where: str | None, pitch: float,
+                quality: str = QUALITY) -> str:
     extra: list[str] = []
     if where != "plain":
         if pitch >= UP_DEG:
@@ -63,4 +64,4 @@ def view_prompt(tags: list[str], where: str | None, pitch: float) -> str:
     else:
         extra = ["no humans"]
     words = list(dict.fromkeys(extra + tags))
-    return ", ".join([QUALITY] + words)
+    return ", ".join(([quality] if quality else []) + words)
