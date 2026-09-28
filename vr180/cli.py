@@ -28,7 +28,10 @@ def parse(argv=None):
     p.add_argument("--tags", default="", help="what surrounds the subject, comma-separated")
     p.add_argument("--tags-file", help="a file of tags; appended to --tags")
     p.add_argument("--checkpoint", required=True, help="Forge checkpoint for the fill")
-    p.add_argument("--method", choices=("cn", "plain"), default="cn")
+    p.add_argument("--method", choices=("plain", "cn"), default="plain",
+                   help="plain: the checkpoint's own inpaint (default). cn: ControlNet Union "
+                        "ProMax inpaint -- NaN or noise in Forge Neo as pinned (V.1)")
+    p.add_argument("--denoise", type=float, default=0.95)
     p.add_argument("--cn-model", default="", help="ControlNet name (default: the ProMax one)")
     p.add_argument("--forge", default="http://127.0.0.1:7860")
     p.add_argument("--long-side", type=float, default=90.0, help="degrees the source spans")
@@ -62,7 +65,8 @@ def main(argv=None) -> int:
 
     f = forge.Forge(a.forge)
     s = forge.Settings(checkpoint=a.checkpoint, method=a.method, cn_model=a.cn_model,
-                       steps=a.steps, cfg=a.cfg, sampler=a.sampler, scheduler=a.scheduler)
+                       steps=a.steps, cfg=a.cfg, sampler=a.sampler, scheduler=a.scheduler,
+                       denoise=a.denoise)
     missing = f.resolve(s)
     if missing:
         print("not ready: " + "; ".join(missing), file=sys.stderr)

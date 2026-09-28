@@ -119,7 +119,7 @@ def test_forge_payload_uses_promax_inpaint(monkeypatch):
         return {"images": [forge.b64png(np.zeros((64, 64, 3), np.uint8))]}
 
     monkeypatch.setattr(f, "_call", fake_call)
-    s = forge.Settings(checkpoint="waiIllustriousSDXL_v140")
+    s = forge.Settings(checkpoint="waiIllustriousSDXL_v140", method="cn")
     assert f.resolve(s) == []
     out = f.inpaint(np.zeros((64, 64, 3), np.uint8), np.zeros((64, 64), np.uint8), "p", "n", 1, s)
     unit = sent["alwayson_scripts"]["ControlNet"]["args"][0]
@@ -131,7 +131,8 @@ def test_forge_payload_uses_promax_inpaint(monkeypatch):
     s2 = forge.Settings(checkpoint="missing")
     monkeypatch.setattr(f, "_call", lambda m, p, payload=None, tries=3:
                         [] if "sd-models" in p else {"model_list": []})
-    assert len(f.resolve(s2)) == 2
+    assert len(f.resolve(s2)) == 1                       # plain needs no ControlNet
+    assert len(f.resolve(forge.Settings(checkpoint="missing", method="cn"))) == 2
 
 
 @pytest.mark.parametrize("yaw,pitch", [(0, 0), (170, 10), (-175, -30), (60, 70), (0, -90),

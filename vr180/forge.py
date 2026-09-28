@@ -3,11 +3,15 @@
 Runs on the pod beside Forge and calls it at localhost, where RunPod's 100-second
 proxy limit does not apply. Two methods, so they can be compared on one pod:
 
-- ``cn`` (default): img2img inpaint with a ControlNet Union **ProMax** unit in its
-  Inpaint mode (``inpaint_only+lama``). The unit is given no image, so Forge hands
-  it img2img's own init image and mask: the model sees the known pixels as
-  context, and ``inpaint_only`` pastes them back exactly afterwards.
-- ``plain``: the V.0 path, a checkpoint in img2img with nothing but the mask.
+- ``plain`` (default): the checkpoint's own img2img inpaint with the mask. With
+  views that are mostly known and told where they face, this is what V.1 kept.
+- ``cn``: the same with a ControlNet Union **ProMax** unit in its Inpaint mode
+  (``inpaint_only+lama``); the unit is given no image, so Forge hands it
+  img2img's own init image and mask. **It does not work in Forge Neo at PQM's
+  pinned commit** (V.1, measured on a 4090): the latent goes NaN in fp16 (black
+  fills), and with ``--bf16-unet`` the hole comes back as pure noise, under
+  ``inpaint_only+lama``, ``inpaint_only`` and ``inpaint_global_harmonious`` alike
+  and at weight 0.7. Kept so it can be retried against a later Forge.
 """
 from __future__ import annotations
 
@@ -43,13 +47,13 @@ class ForgeError(RuntimeError):
 @dataclass
 class Settings:
     checkpoint: str
-    method: str = "cn"
+    method: str = "plain"
     cn_model: str = ""
     steps: int = 28
     cfg: float = 5.0
     sampler: str = "Euler a"
     scheduler: str = "Automatic"
-    denoise: float = 1.0
+    denoise: float = 0.95
     mask_blur: int = 8
     cn_weight: float = 1.0
     cn_end: float = 1.0
