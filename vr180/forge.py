@@ -77,7 +77,13 @@ class Forge:
             time.sleep(5 * (attempt + 1))
 
     def checkpoints(self) -> list[str]:
-        return [m.get("model_name", m.get("title", "")) for m in self._call("GET", "/sdapi/v1/sd-models")]
+        """Every name Forge answers to for each checkpoint: its model name and its
+        title without the hash (``name.safetensors``)."""
+        names = []
+        for m in self._call("GET", "/sdapi/v1/sd-models"):
+            names.append(m.get("model_name", ""))
+            names.append(m.get("title", "").split(" [")[0])
+        return [n for n in names if n]
 
     def cn_models(self) -> list[str]:
         return list(self._call("GET", "/controlnet/model_list").get("model_list", []))
@@ -85,7 +91,9 @@ class Forge:
     def resolve(self, s: Settings) -> list[str]:
         """What is missing for ``s`` on this Forge, by name; empty when ready."""
         missing = []
-        if not any(s.checkpoint in c for c in self.checkpoints()):
+        # Exact, never a substring: Forge silently keeps the loaded model when an
+        # override names one it does not list (V.1 lost two sources that way).
+        if s.checkpoint not in self.checkpoints():
             missing.append("checkpoint %r is not in Forge's list" % s.checkpoint)
         if s.method == "cn":
             names = self.cn_models()

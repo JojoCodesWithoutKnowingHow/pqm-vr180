@@ -111,7 +111,8 @@ def test_forge_payload_uses_promax_inpaint(monkeypatch):
 
     def fake_call(method, path, payload=None, tries=3):
         if path == "/sdapi/v1/sd-models":
-            return [{"model_name": "waiIllustriousSDXL_v140"}]
+            return [{"model_name": "waiIllustriousSDXL_v140",
+                     "title": "waiIllustriousSDXL_v140.safetensors [bdb59bac77]"}]
         if path == "/controlnet/model_list":
             return {"model_list": ["controlnet-union-sdxl-promax [abc]"]}
         sent.update(payload)
@@ -125,6 +126,8 @@ def test_forge_payload_uses_promax_inpaint(monkeypatch):
     assert unit["module"] == "inpaint_only+lama" and unit["type_filter"] == "Inpaint"
     assert unit["model"].startswith("controlnet-union-sdxl-promax") and "image" not in unit
     assert out.shape == (64, 64, 3)
+    assert f.resolve(forge.Settings(checkpoint="waiIllustriousSDXL_v140.safetensors")) == []
+    assert f.resolve(forge.Settings(checkpoint="waiIllustrious")) != []   # no substring
     s2 = forge.Settings(checkpoint="missing")
     monkeypatch.setattr(f, "_call", lambda m, p, payload=None, tries=3:
                         [] if "sd-models" in p else {"model_list": []})
