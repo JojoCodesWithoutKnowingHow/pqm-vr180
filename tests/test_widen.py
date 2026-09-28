@@ -78,7 +78,7 @@ def test_widen_fills_the_front_and_never_touches_the_source(tmp_path):
     fake = FakeForge()
     opt = widen.Options(width=1024, view_px=256, seam_px=8)
     r = widen.widen(src, ["indoors", "wooden floor", "couch"], fake, opt, tmp_path, say=lambda s: None)
-    placed, mask, _f = sphere.place(src, 1024, 90.0)
+    placed, mask, _f = sphere.place(src, 1024, opt.long_side)
     source = mask > 0
     assert np.array_equal(r.pano[source], placed[source])
     assert r.log["front_unfilled"] < 0.002

@@ -1,8 +1,7 @@
 """One image in, one VR180 file out.
 
     python -m vr180 SRC.png -o OUT_180_LR.jpg --tags "indoors, wooden floor, couch" \\
-        --checkpoint waiIllustriousSDXL_v140 --method noob --reference \\
-        --subject-tags "1girl, brown hair, coat"
+        --checkpoint waiIllustriousSDXL_v140 --subject-tags "1girl, brown hair, coat"
 
 Writes, beside OUT: ``<stem>.work/`` with the flat panorama, the source mask,
 every generated view and ``log.json`` (timings, the views, and every choice the
@@ -35,12 +34,13 @@ def parse(argv=None):
                         "continued with them (empty: never continue a body)")
     p.add_argument("--segment-model", default=SEG_MODEL, help="anime-seg isnetis.onnx")
     p.add_argument("--checkpoint", required=True, help="Forge checkpoint for the fill")
-    p.add_argument("--method", choices=("noob", "plain", "cn"), default="plain",
+    p.add_argument("--method", choices=("noob", "plain", "cn"), default="noob",
                    help="noob: NoobAI Inpainting ControlNet (Illustrious/NoobAI checkpoints). "
                         "plain: the checkpoint's own inpaint. cn: ControlNet Union ProMax -- "
                         "NaN or noise in Forge Neo as pinned (V.1)")
-    p.add_argument("--reference", action="store_true",
-                   help="give the source to an IP-Adapter as a reference (needs --ipa-model)")
+    p.add_argument("--no-reference", dest="reference", action="store_false",
+                   help="do not give the source to the IP-Adapter as a reference (on by "
+                        "default with --method noob; noobIPA is for Illustrious/NoobAI)")
     p.add_argument("--ipa-model", default="noobipa")
     p.add_argument("--ipa-weight", type=float, default=0.5)
     p.add_argument("--prompt-mode", choices=("tags", "minimal"), default="tags")
@@ -50,7 +50,10 @@ def parse(argv=None):
                    help="default: 1.0 for noob, 0.95 otherwise")
     p.add_argument("--cn-model", default="", help="the inpaint ControlNet's name")
     p.add_argument("--forge", default="http://127.0.0.1:7860")
-    p.add_argument("--long-side", type=float, default=90.0, help="degrees the source spans")
+    p.add_argument("--long-side", type=float, default=60.0,
+                   help="degrees the source's long side spans (default 60: at 90 a figure is "
+                        "about twice life size and its body runs under the viewer; V.1, judged "
+                        "in a headset)")
     p.add_argument("--width", type=int, default=4096, help="equirect width (VR180 is W/2 per eye)")
     p.add_argument("--target", type=float, default=100.0, help="fill out to this angle off-axis")
     p.add_argument("--max-new", type=float, default=0.45)
@@ -64,7 +67,10 @@ def parse(argv=None):
     p.add_argument("--scheduler", default="Automatic")
     p.add_argument("--strength", default="1.0",
                    help="stereo360's stereo strength; a comma list writes one file per value, "
-                        "the first under OUT, the rest as <stem>_s<value>_180_LR.jpg")
+                        "the first under OUT, the rest as <stem>_s<value>_180_LR.jpg. It scales "
+                        "disparity on relative depth, not the eyes' separation: above 1.0 it "
+                        "pinches the centre and pulls focus close without changing how big the "
+                        "world feels (V.1, in a headset). Leave it at 1.0")
     p.add_argument("--stereo-python", default="/workspace/venvs/stereo360/bin/python")
     p.add_argument("--stereo-dir", default="/workspace/stereo360")
     p.add_argument("--pano-only", action="store_true", help="stop before stereo")
@@ -92,7 +98,8 @@ def main(argv=None) -> int:
     f = forge.Forge(a.forge)
     denoise = a.denoise if a.denoise is not None else (1.0 if a.method == "noob" else 0.95)
     s = forge.Settings(checkpoint=a.checkpoint, method=a.method, cn_model=a.cn_model,
-                       ipa_model=a.ipa_model if a.reference else "", ipa_weight=a.ipa_weight,
+                       ipa_model=a.ipa_model if a.reference and a.method == "noob" else "",
+                       ipa_weight=a.ipa_weight,
                        steps=a.steps, cfg=a.cfg, sampler=a.sampler, scheduler=a.scheduler,
                        denoise=denoise)
     missing = f.resolve(s)
@@ -115,7 +122,7 @@ def main(argv=None) -> int:
                         max_new=a.max_new, seed=a.seed, quality=a.quality,
                         negative=a.negative, subject_tags=subject_tags,
                         plain_fill=not a.no_plain_fill, prompt_mode=a.prompt_mode,
-                        reference=a.reference)
+                        reference=a.reference and a.method == "noob")
     src = np.array(Image.open(a.src).convert("RGB"))
     t0 = time.time()
     r = widen.widen(src, tags, inpaint, opt, work, segment=segment)

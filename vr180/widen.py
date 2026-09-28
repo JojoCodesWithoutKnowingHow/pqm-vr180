@@ -44,7 +44,7 @@ Segment = Callable[[np.ndarray], np.ndarray]
 @dataclass
 class Options:
     width: int = 4096            # the equirect's width; VR180 then has W/2 per eye
-    long_side: float = 90.0      # degrees the source's long side spans
+    long_side: float = 60.0      # degrees the source's long side spans (V.1: 90 is twice life size)
     view_fov: float = 90.0
     view_px: int = 1024
     target_deg: float = 100.0    # fill out to this angle off straight ahead
