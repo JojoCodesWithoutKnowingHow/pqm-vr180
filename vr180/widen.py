@@ -134,7 +134,8 @@ def widen(src: np.ndarray, fill_tags: list[str], inpaint: Inpainter, opt: Option
         seeded = _seed(view, unknown)
         prompt = prompts.view_prompt(fill_tags, where, v.pitch, opt.quality)
         t0 = time.time()
-        gen = inpaint(seeded, gen_mask, prompt, opt.negative, opt.seed + n)
+        negative = prompts.view_negative(opt.negative, where, v.pitch)
+        gen = inpaint(seeded, gen_mask, prompt, negative, opt.seed + n)
         secs = time.time() - t0
         w = _feather(gen_mask, unknown, opt.seam_px)
         rows, cols = region = sphere.bounds(v.yaw, v.pitch, F, opt.width)
@@ -148,6 +149,7 @@ def widen(src: np.ndarray, fill_tags: list[str], inpaint: Inpainter, opt: Option
         rest = planner.remaining(planner.small(known))
         log["views"].append({"yaw": v.yaw, "pitch": v.pitch, "new": round(v.new, 3),
                              "seconds": round(secs, 1), "prompt": prompt,
+                             "negative_extra": negative[len(opt.negative):].lstrip(", "),
                              "target_left": round(rest, 4)})
         say("view %2d yaw %4.0f pitch %4.0f: %2.0f%% new, %.1fs, %.1f%% of target left"
             % (n, v.yaw, v.pitch, v.new * 100, secs, rest * 100))

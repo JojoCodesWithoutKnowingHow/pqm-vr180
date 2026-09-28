@@ -22,9 +22,22 @@ _PLAIN = {"simple background", "white background", "grey background", "gray back
           "black background", "gradient background", "blue background", "pink background",
           "transparent background", "two-tone background"}
 
-UP_DEG = 45.0
-DOWN_DEG = -45.0
+#: Views steeper than this are "looking up" or "looking down". The planner's views
+#: sit at 40-50 degrees, and a 90-degree view at -40 is almost all ground.
+UP_DEG = 35.0
+DOWN_DEG = -35.0
 
+#: What belongs above the horizon and what below it. V.1's first landscape put
+#: `sky, cloud, sunset, horizon` into the views facing the ground too, and they
+#: painted a second sunset under the viewer.
+SKYWARD = {"sky", "cloud", "clouds", "cloudy sky", "blue sky", "night sky", "starry sky",
+           "sunset", "sunrise", "sun", "moon", "star (sky)", "horizon", "mountain",
+           "mountainous horizon", "skyscraper", "cityscape", "ceiling", "wooden ceiling",
+           "ceiling light", "chandelier", "twilight", "evening", "neon lights", "lamp"}
+EARTHWARD = {"ground", "grass", "floor", "wooden floor", "tatami", "carpet", "rug",
+             "road", "street", "path", "water", "lake", "river", "ocean", "sea", "beach",
+             "reflection", "sand", "dirt", "field", "alpine lake", "couch", "chair",
+             "table", "coffee table", "bench"}
 
 def split_tags(text: str) -> list[str]:
     return [t.strip().replace("_", " ") for t in text.replace("\n", ",").split(",") if t.strip()]
@@ -52,16 +65,35 @@ def setting(tags: list[str]) -> tuple[str | None, str]:
     return None, "no setting in the tags"
 
 
+def facing(pitch: float) -> str:
+    return "up" if pitch >= UP_DEG else "down" if pitch <= DOWN_DEG else "level"
+
+
 def view_prompt(tags: list[str], where: str | None, pitch: float,
                 quality: str = QUALITY) -> str:
-    extra: list[str] = []
-    if where != "plain":
-        if pitch >= UP_DEG:
-            extra = {"indoors": ["ceiling", "ceiling light"], "outdoors": ["sky"]}.get(where, [])
-        elif pitch <= DOWN_DEG:
-            extra = {"indoors": ["floor"], "outdoors": ["ground"]}.get(where, [])
-        extra = ["scenery", "no humans"] + extra
-    else:
+    face = facing(pitch)
+    if where == "plain":
         extra = ["no humans"]
-    words = list(dict.fromkeys(extra + tags))
+    else:
+        extra = ["scenery", "no humans"]
+        if face == "up":
+            extra += {"indoors": ["ceiling", "from below"],
+                      "outdoors": ["sky", "from below"]}.get(where, [])
+        elif face == "down":
+            extra += {"indoors": ["floor", "from above"],
+                      "outdoors": ["ground", "from above"]}.get(where, [])
+    drop = {"up": EARTHWARD, "down": SKYWARD}.get(face, set()) if where != "plain" else set()
+    kept = [t for t in tags if t.lower() not in drop]
+    words = list(dict.fromkeys(extra + kept))
     return ", ".join(([quality] if quality else []) + words)
+
+
+def view_negative(base: str, where: str | None, pitch: float) -> str:
+    """The negative for a view: the base, plus, for a view looking up or down,
+    what belongs to the other half of the scene and any horizon at all."""
+    face = facing(pitch)
+    if where == "plain" or face == "level":
+        return base
+    other = {"up": "ground, floor, grass, water, horizon, landscape",
+             "down": "sky, cloud, sun, sunset, horizon, mountain, ceiling"}[face]
+    return base + ", " + other

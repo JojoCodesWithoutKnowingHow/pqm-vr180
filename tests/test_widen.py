@@ -148,3 +148,17 @@ def test_bounds_hold_everything_a_view_covers(yaw, pitch):
     assert not (full_cover & ~inside).any()
     assert np.array_equal(full_cover[region[0]][:, region[1]], cover)
     assert np.array_equal(full_img[region[0]][:, region[1]][cover], img[cover])
+
+
+def test_views_facing_down_or_up_drop_the_other_half():
+    tags = ["landscape", "mountain", "lake", "sky", "cloud", "sunset", "grass", "reflection"]
+    down = prompts.view_prompt(tags, "outdoors", -50).split(", ")
+    up = prompts.view_prompt(tags, "outdoors", 50).split(", ")
+    level = prompts.view_prompt(tags, "outdoors", 0).split(", ")
+    assert "ground" in down and not {"sky", "cloud", "sunset", "mountain"} & set(down)
+    assert "lake" in down and "grass" in down
+    assert "sky" in up and not {"lake", "grass", "reflection"} & set(up)
+    assert set(tags) <= set(level)
+    assert "horizon" in prompts.view_negative("x", "outdoors", -50)
+    assert prompts.view_negative("x", "outdoors", 0) == "x"
+    assert prompts.view_negative("x", "plain", -80) == "x"
