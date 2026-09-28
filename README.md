@@ -31,7 +31,15 @@ program made on its own with the reason.
 
 `setup/pod_setup.sh all` installs and verifies everything, given PQM's pod image
 (Forge Neo at `:7860`) and this repo at `/workspace/pqm-vr180`. The checkpoint is
-the pod's business (PQM provisions it), not this program's.
+the pod's business (PQM provisions it), not this program's. Two things about that
+image, both measured in V.1:
+
+- **Download into `models/` only after Forge answers.** The image's entrypoint
+  replaces `models/` with a symlink partway through boot; a file written before
+  that is deleted.
+- **The ControlNet must be in place before Forge starts**, or Forge restarted
+  after it lands: Forge lists `models/ControlNet` once, at startup, and its API
+  has no refresh. `pod_setup.sh controlnet` says so by name when it happens.
 
 ## Tests
 

@@ -49,7 +49,6 @@ stereo360() {
   PY="$VENVS/stereo360/bin/python"
   uv pip install -q -p "$PY" -r "$STEREO360_DIR/requirements.txt"
   uv pip install -q -p "$PY" onnxruntime-gpu || uv pip install -q -p "$PY" onnxruntime
-  (cd "$STEREO360_DIR" && uv pip install -q -p "$PY" -e . || true)
   # Warm up on a small synthetic pano: fetches Depth Pro and LaMa now, not mid-run.
   "$PY" - <<'EOF'
 import numpy as np
@@ -74,9 +73,11 @@ controlnet() {
     mv "$f.part" "$f"
     echo "ControlNet in $(( $(date +%s) - t0 ))s"
   fi
-  # Forge reads the folder on each list call.
+  # Forge reads models/ControlNet once, at startup; its API has no refresh (only
+  # the web UI's button does). A file added to a running Forge is not listed
+  # until Forge restarts (V.1, measured). Put this in place before Forge starts.
   curl -sf "$FORGE_URL/controlnet/model_list" | grep -q "controlnet-union-sdxl-promax" \
-    || { echo "Forge does not list $CN_FILE"; exit 5; }
+    || { echo "$CN_FILE is on disk but Forge started before it: restart Forge"; exit 5; }
 }
 
 verify() {
