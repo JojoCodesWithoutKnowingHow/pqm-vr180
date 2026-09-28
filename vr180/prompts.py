@@ -7,9 +7,14 @@ another lake instead of the ground, because every view was prompted "scenery".
 from __future__ import annotations
 
 QUALITY = "masterpiece, best quality, amazing quality, very aesthetic, absurdres"
-NEGATIVE = ("1girl, 1boy, multiple girls, multiple boys, person, people, human, character, "
-            "face, text, watermark, signature, frame, border, picture frame, lowres, "
-            "worst quality, bad quality, jpeg artifacts, blurry")
+#: What no view wants, and what views that are not continuing the subject add.
+BASE_NEGATIVE = ("text, watermark, signature, frame, border, picture frame, lowres, "
+                 "worst quality, bad quality, jpeg artifacts, blurry")
+NO_PEOPLE = "1girl, 1boy, multiple girls, multiple boys, person, people, human, character, face"
+NEGATIVE = NO_PEOPLE + ", " + BASE_NEGATIVE
+#: A view continuing the subject: one body, the one that is already there.
+SUBJECT_NEGATIVE = ("multiple girls, multiple boys, extra person, extra arms, extra legs, "
+                    "extra hands, bad anatomy, cropped, " + BASE_NEGATIVE)
 
 _INDOOR = {"indoors", "room", "bedroom", "living room", "classroom", "kitchen", "bathroom",
            "ceiling", "wooden ceiling", "wall", "shouji", "window", "curtains", "floor",
@@ -97,3 +102,19 @@ def view_negative(base: str, where: str | None, pitch: float) -> str:
     other = {"up": "ground, floor, grass, water, horizon, landscape",
              "down": "sky, cloud, sun, sunset, horizon, mountain, ceiling"}[face]
     return base + ", " + other
+
+
+def subject_prompt(subject_tags: list[str], fill_tags: list[str], where: str | None,
+                   pitch: float, quality: str = QUALITY) -> str:
+    """A view that continues a subject the frame cut off: the subject's own tags
+    first, then the surroundings for this direction, never "no humans"."""
+    rest = view_prompt(fill_tags, where, pitch, quality="").split(", ")
+    rest = [t for t in rest if t and t not in ("no humans", "scenery")]
+    words = list(dict.fromkeys(list(subject_tags) + rest))
+    return ", ".join(([quality] if quality else []) + words)
+
+
+def minimal_prompt(where: str | None, pitch: float, quality: str = QUALITY) -> str:
+    """No fill tags at all, only the direction: for use with a reference image,
+    which carries the scene (Krita AI Diffusion's expand leaves the prompt empty)."""
+    return view_prompt([], where, pitch, quality)

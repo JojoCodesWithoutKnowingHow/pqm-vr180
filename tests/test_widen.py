@@ -63,8 +63,11 @@ class FakeForge:
     def __init__(self):
         self.calls = []
 
-    def __call__(self, image, mask, prompt, negative, seed):
-        self.calls.append({"prompt": prompt, "masked": float((mask > 0).mean())})
+    def __call__(self, image, mask, prompt, negative, seed, control=None, reference=None):
+        self.calls.append({"prompt": prompt, "negative": negative, "masked": float((mask > 0).mean()),
+                           "control_black": None if control is None
+                           else bool((control[mask > 0] == 0).all()),
+                           "reference": reference is not None})
         out = image.copy()
         out[mask > 0] = (out[mask > 0] * 0.5 + np.array([0, 60, 0])).astype(np.uint8)
         return out
@@ -162,3 +165,74 @@ def test_views_facing_down_or_up_drop_the_other_half():
     assert "horizon" in prompts.view_negative("x", "outdoors", -50)
     assert prompts.view_negative("x", "outdoors", 0) == "x"
     assert prompts.view_negative("x", "plain", -80) == "x"
+
+
+
+def test_plain_background_views_are_extended_without_diffusion(tmp_path):
+    src = checker(416, 608)
+    fake = FakeForge()
+    opt = widen.Options(width=1024, view_px=256, seam_px=8)
+    r = widen.widen(src, ["simple background", "grey background"], fake, opt, None,
+                    say=lambda s: None)
+    assert r.log["setting"] == "plain"
+    assert fake.calls == []
+    assert {v["kind"] for v in r.log["views"]} == {"plain"}
+    assert r.log["front_unfilled"] < 0.002
+
+
+def test_a_subject_cut_by_the_frame_is_continued(tmp_path):
+    # The "subject" is the bottom half of the source, running off its bottom edge.
+    src = checker(416, 608)
+
+    def segment(rgb):
+        m = np.zeros(rgb.shape[:2], bool)
+        m[rgb.shape[0] // 2:, rgb.shape[1] // 4: 3 * rgb.shape[1] // 4] = True
+        return m
+
+    fake = FakeForge()
+    opt = widen.Options(width=1024, view_px=256, seam_px=8, subject_tags=("1girl", "skirt"),
+                        reference=True)
+    r = widen.widen(src, ["simple background", "grey background"], fake, opt, None,
+                    say=lambda s: None, segment=segment)
+    assert r.log["subject"]["cut_at"] == ["bottom"]
+    kinds = [v["kind"] for v in r.log["views"]]
+    assert "subject" in kinds and "plain" in kinds
+    subj = [c for c in fake.calls]
+    assert subj and all(c["prompt"].split(", ")[5] == "1girl" for c in subj)
+    assert all("no humans" not in c["prompt"] and "1girl" not in c["negative"] for c in subj)
+    assert all(c["control_black"] and c["reference"] for c in subj)
+    down = [v for v in r.log["views"] if v["kind"] == "subject"]
+    assert min(v["pitch"] for v in down) < 0          # it went on below the frame
+
+
+def test_black_fill_is_refused(monkeypatch):
+    f = forge.Forge("http://x")
+    monkeypatch.setattr(f, "_call", lambda m, p, payload=None, tries=3:
+                        {"images": [forge.b64png(np.zeros((32, 32, 3), np.uint8))]})
+    mask = np.zeros((32, 32), np.uint8)
+    mask[8:24, 8:24] = 255
+    with pytest.raises(forge.ForgeError, match="black"):
+        f.inpaint(np.full((32, 32, 3), 128, np.uint8), mask, "p", "n", 1,
+                  forge.Settings(checkpoint="c"))
+
+
+def test_noob_sends_its_own_black_control_and_a_reference(monkeypatch):
+    f = forge.Forge("http://x")
+    sent = {}
+
+    def fake_call(method, path, payload=None, tries=3):
+        if path == "/sdapi/v1/sd-models":
+            return [{"model_name": "c", "title": "c.safetensors [x]"}]
+        if path == "/controlnet/model_list":
+            return {"model_list": ["None", "noobaiInpainting_v10.fp16", "noobIPAMARK1_mark1"]}
+        sent.update(payload)
+        return {"images": [forge.b64png(np.full((32, 32, 3), 90, np.uint8))]}
+
+    monkeypatch.setattr(f, "_call", fake_call)
+    s = forge.Settings(checkpoint="c", method="noob", ipa_model="noobipa")
+    assert f.resolve(s) == [] and s.cn_model.startswith("noobai") and s.ipa_model.startswith("noobIPA")
+    img = np.full((32, 32, 3), 128, np.uint8)
+    f.inpaint(img, np.full((32, 32), 255, np.uint8), "p", "n", 1, s, control=img, reference=img)
+    units = sent["alwayson_scripts"]["ControlNet"]["args"]
+    assert units[0]["module"] == "None" and "image" in units[0]
+    assert units[1]["module"] == forge.IPA_MODULE and units[1]["weight"] == 0.5

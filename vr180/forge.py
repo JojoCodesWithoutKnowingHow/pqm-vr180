@@ -44,11 +44,21 @@ class ForgeError(RuntimeError):
     pass
 
 
+#: Forge's IP-Adapter preprocessor for SDXL/Illustrious (it fetches CLIP-ViT-bigG itself).
+IPA_MODULE = "CLIP-ViT-bigG (IPAdapter)"
+#: What each method needs from Forge's ControlNet list: (setting field, name fragment).
+NEEDS = {"cn": [("cn_model", "promax")],
+         "noob": [("cn_model", "noobaiinpainting")]}
+
+
 @dataclass
 class Settings:
     checkpoint: str
     method: str = "plain"
     cn_model: str = ""
+    ipa_model: str = ""          # "" = no reference; "noobipa" or a name = use one
+    ipa_weight: float = 0.5
+    ipa_range: tuple = (0.2, 0.8)
     steps: int = 28
     cfg: float = 5.0
     sampler: str = "Euler a"
@@ -93,24 +103,33 @@ class Forge:
         return list(self._call("GET", "/controlnet/model_list").get("model_list", []))
 
     def resolve(self, s: Settings) -> list[str]:
-        """What is missing for ``s`` on this Forge, by name; empty when ready."""
+        """What is missing for ``s`` on this Forge, by name; empty when ready.
+        Fills ``s.cn_model`` / ``s.ipa_model`` with Forge's own names."""
         missing = []
         # Exact, never a substring: Forge silently keeps the loaded model when an
         # override names one it does not list (V.1 lost two sources that way).
         if s.checkpoint not in self.checkpoints():
             missing.append("checkpoint %r is not in Forge's list" % s.checkpoint)
-        if s.method == "cn":
+        wanted = [(f, getattr(s, f) or frag) for f, frag in NEEDS.get(s.method, [])]
+        if s.ipa_model:
+            wanted.append(("ipa_model", s.ipa_model))
+        if wanted:
             names = self.cn_models()
-            hit = [n for n in names if (s.cn_model or "promax").lower() in n.lower()]
-            if not hit:
-                missing.append("no ControlNet matching %r among %s" % (s.cn_model or "promax", names))
-            else:
-                s.cn_model = hit[0]
+            for field_name, frag in wanted:
+                hit = [n for n in names if frag.lower() in n.lower()]
+                if hit:
+                    setattr(s, field_name, hit[0])
+                else:
+                    missing.append("no ControlNet matching %r among %s" % (frag, names))
         return missing
 
     def inpaint(self, image: np.ndarray, mask: np.ndarray, prompt: str, negative: str,
-                seed: int, s: Settings) -> np.ndarray:
-        """``mask`` is uint8, 255 where to paint. Returns an image the size of ``image``."""
+                seed: int, s: Settings, control: np.ndarray | None = None,
+                reference: np.ndarray | None = None) -> np.ndarray:
+        """``mask`` is uint8, 255 where to paint. ``control`` is the inpaint
+        ControlNet's image (``noob``: the view with the hole pure black);
+        ``reference`` the IP-Adapter's. Returns an image the size of ``image``.
+        Raises ``ForgeError`` when the fill comes back black (NaN latents)."""
         h, w = image.shape[:2]
         payload = {
             "init_images": [b64png(image)], "mask": b64png(mask),
@@ -123,14 +142,35 @@ class Forge:
             "override_settings_restore_afterwards": False,
             "send_images": True, "save_images": False,
         }
+        units = []
         if s.method == "cn":
-            payload["alwayson_scripts"] = {"ControlNet": {"args": [{
-                "enabled": True, "module": CN_MODULE, "model": s.cn_model,
-                "type_filter": CN_TYPE, "weight": s.cn_weight, "guidance_start": 0.0,
-                "guidance_end": s.cn_end, "control_mode": "Balanced", "pixel_perfect": True,
-                "resize_mode": "Just Resize"}]}}
+            units.append({"enabled": True, "module": CN_MODULE, "model": s.cn_model,
+                          "type_filter": CN_TYPE, "weight": s.cn_weight, "guidance_start": 0.0,
+                          "guidance_end": s.cn_end, "control_mode": "Balanced",
+                          "pixel_perfect": True, "resize_mode": "Just Resize"})
+        elif s.method == "noob":
+            if control is None:
+                raise ValueError("noob needs a control image")
+            # No preprocessor: NoobAI Inpainting wants the hole pure black, and
+            # Forge's inpaint preprocessors write -1 there instead.
+            units.append({"enabled": True, "module": "None", "model": s.cn_model,
+                          "image": b64png(control), "weight": s.cn_weight,
+                          "guidance_start": 0.0, "guidance_end": s.cn_end,
+                          "control_mode": "Balanced", "pixel_perfect": True,
+                          "resize_mode": "Just Resize"})
+        if s.ipa_model and reference is not None:
+            units.append({"enabled": True, "module": IPA_MODULE, "model": s.ipa_model,
+                          "image": b64png(reference), "weight": s.ipa_weight,
+                          "guidance_start": s.ipa_range[0], "guidance_end": s.ipa_range[1],
+                          "control_mode": "Balanced", "resize_mode": "Just Resize"})
+        if units:
+            payload["alwayson_scripts"] = {"ControlNet": {"args": units}}
         r = self._call("POST", "/sdapi/v1/img2img", payload)
         out = unpng(r["images"][0])
         if out.shape[:2] != (h, w):
             out = np.array(Image.fromarray(out).resize((w, h), Image.LANCZOS))
+        hole = mask > 127
+        if hole.any() and float((out[hole].max(1) <= 2).mean()) > 0.5:
+            raise ForgeError("the fill came back black (NaN latents): %s with %s"
+                             % (s.method, [u["model"] for u in units]))
         return out
