@@ -83,7 +83,9 @@ stereo360() {
   uv venv --allow-existing -q -p 3.12 "$VENVS/stereo360"
   PY="$VENVS/stereo360/bin/python"
   uv pip install -q -p "$PY" -r "$STEREO360_DIR/requirements.txt"
-  uv pip install -q -p "$PY" onnxruntime-gpu || uv pip install -q -p "$PY" onnxruntime
+  # onnxruntime-gpu once hung for 16 minutes on a pod (V.1); only stereo360's onnx
+  # depth backend uses it, so a time limit and the CPU build are enough.
+  timeout 180 uv pip install -q -p "$PY" onnxruntime-gpu || uv pip install -q -p "$PY" onnxruntime
   # Warm up on a small synthetic pano: fetches Depth Pro and LaMa now, not mid-run.
   "$PY" - <<'EOF'
 import numpy as np
