@@ -1,25 +1,27 @@
 #!/usr/bin/env bash
 # Install what vr180 needs on a PQM pod (Forge Neo already running at :7860).
 #
-#   pod_setup.sh companion|stereo360|models|moge|promax|verify|all
+#   pod_setup.sh companion|stereo360|models|moge|restart|promax|verify|all
 #
 # Each part is verified before it prints "SETUP <part> OK"; a part that cannot be
 # verified exits non-zero, which is what a bootstrap should read as failure.
 #
-# Paths match PQM's pod image (docs/04). The companion itself is expected at
-# $VR180_DIR, put there at a pinned commit (V.1: uploaded as `git archive`).
+# Paths match PQM's pod image (docs/04). The companion is this script's own checkout
+# unless $VR180_DIR says otherwise: PQM's pod fetches it at a pinned commit (G.5).
 #
 # Two things about that image (V.1, measured): download into models/ only after
 # Forge answers (the entrypoint replaces models/ partway through boot), and put
 # ControlNet models in place before Forge starts, or restart it afterwards (Forge
-# lists models/ControlNet once, at startup, and its API has no refresh).
+# lists models/ControlNet once, at startup, and its API has no refresh). PQM installs
+# after Forge is up, so `restart` restarts Forge as the image started it (V.2).
 set -euo pipefail
 
-VR180_DIR=${VR180_DIR:-/workspace/pqm-vr180}
+VR180_DIR=${VR180_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}
 VENVS=${VENVS:-/workspace/venvs}
 FORGE_DIR=${FORGE_DIR:-/workspace/forge/sd-webui-forge-neo}
 FORGE_URL=${FORGE_URL:-http://127.0.0.1:7860}
 SEG_DIR=${SEG_DIR:-/workspace/models/anime-seg}
+TAGGER_DIR=${TAGGER_DIR:-/workspace/models/wd-eva02-large-tagger-v3}
 
 STEREO360_REPO=https://github.com/LeonG-ZA/stereo360
 STEREO360_REF=23d1e256a8562fe7ebaf55dc41c809a8f43e774b
@@ -41,7 +43,12 @@ MODELS=(
   "$PRE/CLIP-ViT-bigG.safetensors|$HF/h94/IP-Adapter/resolve/018e402774aeeddd60609b4ecdb7e298259dc729/sdxl_models/image_encoder/model.safetensors|657723e09f46a7c3957df651601029f66b1748afb12b419816330f16ed45d64d"
   # anime-segmentation ISNet-IS (SkyTNT, Apache-2.0), for continuing a cut-off subject
   "$SEG_DIR/isnetis.onnx|$HF/skytnt/anime-seg/resolve/493cb60893f47441b26ec4fb9a306bce9e342982/isnetis.onnx|f15622d853e8260172812b657053460e20806f04b9e05147d49af7bed31a6e99"
+  # WD EVA02-Large Tagger v3 (SmilingWolf, Apache-2.0): what surrounds the subject, for PQM (V.2)
+  "$TAGGER_DIR/model.onnx|$HF/SmilingWolf/wd-eva02-large-tagger-v3/resolve/b25b82a03f7282e41aa2f257a52c7583b710bd1c/model.onnx|9e768793060c7939b277ccb382783e8670e8a042d29d77aa736be0c8cc898bfc"
+  "$TAGGER_DIR/selected_tags.csv|$HF/SmilingWolf/wd-eva02-large-tagger-v3/resolve/b25b82a03f7282e41aa2f257a52c7583b710bd1c/selected_tags.csv|298633d94d0031d2081c0893f29c82eab7f0df00b08483ba8f29d1e979441217"
 )
+# What `restart` waits for Forge to list: the ControlNets the default method uses.
+CONTROLNETS=(noobaiInpainting noobIPAMARK1)
 # ControlNet Union SDXL ProMax: NaN (fp16) or noise (bf16) in Forge Neo as pinned. Opt-in.
 PROMAX="$CN/controlnet-union-sdxl-promax.safetensors|$HF/xinsir/controlnet-union-sdxl-1.0/resolve/801a4a3fa3d4c936f4feea95b98607bc6726f80c/diffusion_pytorch_model_promax.safetensors|9fae2e50cb431bfcbe05822b59ec2228df545ef27f711dea8949e9f4ed9f7cdc"
 
@@ -103,10 +110,14 @@ EOF
 }
 
 models() {
+  # Fetched and verified here; Forge sees the ControlNets after `restart`.
   for m in "${MODELS[@]}"; do fetch "$m"; done
-  for name in noobaiInpainting noobIPAMARK1; do
-    listed "$name" || { echo "$name is on disk but Forge started before it: restart Forge"; exit 5; }
-  done
+}
+
+restart() {
+  # Forge lists models/ControlNet only at startup: restart it as the image started it,
+  # unless it already lists them (V.2; the author's choice over a change to PQM).
+  python3 "$VR180_DIR/setup/restart_forge.py" "${CONTROLNETS[@]}"
 }
 
 moge() {
@@ -138,12 +149,13 @@ verify() {
     echo "$sha  $dest" | sha256sum -c --quiet -
   done
   listed noobaiInpainting && listed noobIPAMARK1
+  "$VENVS/vr180/bin/python" -c "import sys; sys.path.insert(0, '$VR180_DIR'); from vr180.tagger import Tagger; t = Tagger('$TAGGER_DIR'); print('tagger', len(t.names), 'tags')"
   curl -sf "$FORGE_URL/controlnet/module_list" | grep -q "CLIP-ViT-bigG (IPAdapter)"
 }
 
 case "${1:-all}" in
-  companion|stereo360|models|moge|promax|verify) "$1" ;;
-  all) companion; stereo360; models; moge; verify ;;
-  *) echo "usage: $0 companion|stereo360|models|moge|promax|verify|all"; exit 2 ;;
+  companion|stereo360|models|moge|restart|promax|verify) "$1" ;;
+  all) companion; stereo360; models; moge; restart; verify ;;
+  *) echo "usage: $0 companion|stereo360|models|moge|restart|promax|verify|all"; exit 2 ;;
 esac
 echo "SETUP ${1:-all} OK"

@@ -44,6 +44,18 @@ over five rounds, every default below judged by the author in a Quest 3.
    Base (IW3's Any_B). `--strength` stays 1.0 and `--gradient-limit` at its default
    (0 corrupted the generated areas).
 
+## Before widening: `vr180.analyze` (0.4.0, for PQM's VR extension)
+
+    python -m vr180.analyze SRC.png -o analysis.json
+
+Reports, and never decides: the [WD EVA02-Large Tagger v3](https://huggingface.co/SmilingWolf/wd-eva02-large-tagger-v3)'s
+tags with scores, whether anime-seg finds a subject and which frame edges cut it,
+and MoGe-2's placement **with the raw estimate before clamping**. PQM's VR
+extension (V.2) reads it, sorts the tags with PQM's own classifier, and either
+runs `python -m vr180` with every choice explicit or sets the image aside for the
+user when it is not sure. Each part that fails is reported under `error`; the
+rest still report.
+
 Beside the output, `<stem>.work/` keeps the flat panorama, every generated view
 and `log.json`: timings, each view's direction, kind, steps, size and prompt, the
 placement and why, and the seam measurements.
@@ -51,9 +63,12 @@ placement and why, and the seam measurements.
 ## On a pod
 
 `setup/pod_setup.sh all` installs and verifies everything, given PQM's pod image
-(Forge Neo at `:7860`) and this repo at `/workspace/pqm-vr180`: the companion's
-venv, stereo360 (warmed), MoGe-2 in its own venv (warmed), and four sha256-pinned
-models (NoobAI Inpainting, noobIPA MARK1, CLIP-ViT-bigG, anime-seg). The
+(Forge Neo at `:7860`) and this repo checked out anywhere (the script finds its
+own checkout; PQM's pod fetches it at a pinned commit): the companion's venv,
+stereo360 (warmed), MoGe-2 in its own venv (warmed), six sha256-pinned models
+(NoobAI Inpainting, noobIPA MARK1, CLIP-ViT-bigG, anime-seg, and the WD tagger's
+model and tag list), and **`restart`**: Forge restarted exactly as the image
+started it (`setup/restart_forge.py`), waited for until it lists the ControlNets. The
 checkpoint and any style LoRA are the pod's business (PQM provisions them). Two
 things about that image, measured in V.1:
 
@@ -70,6 +85,7 @@ Measured on an RTX 4090: install about 5-6 minutes after Forge answers; an image
     py -3.13 -m venv .venv && .venv/Scripts/pip install -r requirements.txt pytest
     .venv/Scripts/python -m pytest
 
-55 offline tests with a fake Forge: geometry, planning, source preservation,
+62 offline tests with a fake Forge: geometry, planning, source preservation,
 subject continuation, plain fill, the taper, the depth curve and normalisation,
-placement, the seam remedies and the Forge payloads.
+placement, the seam remedies, the Forge payloads, the tagger, `analyze` and
+the Forge restart's process matching.
