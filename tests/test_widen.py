@@ -332,3 +332,26 @@ def test_continuation_zone_follows_the_cut_width():
     cols = np.flatnonzero(z.any(0))
     assert cols[0] > 40 and cols[-1] < 216               # near the body, not the whole width
     assert widen.continuation_zone(np.zeros_like(subj), ~known, ~known, S) is None
+
+
+def test_a_body_reaching_the_zone_edge_is_carried_on_by_the_next_view():
+    # The fake Forge tints what it paints green; the stand-in segmenter calls the
+    # source's lower half and anything green "her". A body that reaches the zone's
+    # far edge must leave the strip beyond it empty for a later subject view,
+    # instead of pass 2 filling it with scene (V.1: the body stopped short).
+    src = checker(416, 608)
+
+    def segment(rgb):
+        m = np.zeros(rgb.shape[:2], bool)
+        if rgb.shape[:2] == src.shape[:2]:
+            m[rgb.shape[0] // 2:, rgb.shape[1] * 2 // 5: rgb.shape[1] * 3 // 5] = True
+            return m
+        return (rgb[..., 1].astype(int) - rgb[..., 0] > 40)
+
+    fake = FakeForge()
+    opt = widen.Options(width=1024, view_px=256, seam_px=8, subject_tags=("1girl",), taper=False)
+    r = widen.widen(src, ["indoors", "room"], fake, opt, None, say=lambda s: None, segment=segment)
+    views = r.log["views"]
+    assert any(v["reserved"] > 0 for v in views)
+    assert sum(v["kind"] == "subject" for v in views) >= 2
+    assert r.log["front_unfilled"] < 0.002

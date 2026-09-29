@@ -90,3 +90,22 @@ def test_camera_placement_uses_the_estimated_focal_length_and_falls_back():
     deg, why = placement.by_camera(1024, 768, {"error": "Traceback...\nOSError: no model"})
     assert deg == 60.0 and "OSError: no model" in why
     assert placement.by_camera(1024, 768, None)[0] == 60.0
+
+
+def test_detail_match_and_rim_bring_the_seam_ratio_toward_one():
+    from vr180 import post
+    rng = np.random.default_rng(0)
+    base = rng.integers(60, 200, (400, 400, 3)).astype(np.uint8)
+    import cv2
+    soft = cv2.GaussianBlur(base, (0, 0), 1.5)
+    source = np.zeros((400, 400), bool)
+    source[100:300, 100:300] = True
+    pano = np.where(source[..., None], base, soft)          # crisp source, soft fill
+    before = post.detail_ratio(pano, source)
+    sharpened, amount = post.detail_match(pano, source)
+    assert before > 1.5 and amount > 0
+    assert abs(post.detail_ratio(sharpened, source) - 1) < abs(before - 1)
+    assert np.array_equal(sharpened[source], pano[source])  # the source untouched
+    rimmed = post.soften_rim(pano, source, 12)
+    assert np.array_equal(rimmed[~source], pano[~source])   # the rim touches only the source
+    assert np.array_equal(rimmed[130:270, 130:270], pano[130:270, 130:270])

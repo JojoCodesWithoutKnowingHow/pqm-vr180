@@ -18,7 +18,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from . import __version__, forge, placement, prompts, stereo, widen
+from . import __version__, forge, placement, post, prompts, stereo, widen
 
 SEG_MODEL = "/workspace/models/anime-seg/isnetis.onnx"
 DEPTH_MODELS = {"any-b": ["--depth-backend", "depth-anything"],
@@ -68,6 +68,16 @@ def parse(argv=None):
                         "get fewer steps, 28 within 40 deg easing to 12 at 100, and render at "
                         "768 px beyond 60 deg; subject views always get full work). V.1: 14-30%% "
                         "faster per image, and the author could not see it in the headset")
+    p.add_argument("--view-fov", type=float, default=90.0,
+                   help="each view's field of view; narrower views put more pixels on each "
+                        "degree (sharper fill, more views)")
+    p.add_argument("--view-px", type=int, default=1024)
+    p.add_argument("--detail-match", action="store_true",
+                   help="sharpen the fill to the source's fine-detail level (the seam V.1 saw "
+                        "was a sharpness step)")
+    p.add_argument("--soften-rim", type=int, default=0, metavar="PX",
+                   help="soften the source's outermost PX pixels toward the fill (touches the "
+                        "source's edge; the author allowed it)")
     p.add_argument("--cfg", type=float, default=5.0)
     p.add_argument("--seed", type=int, default=1234)
     p.add_argument("--quality", default=prompts.QUALITY,
@@ -146,7 +156,7 @@ def main(argv=None) -> int:
                         negative=a.negative, subject_tags=subject_tags,
                         plain_fill=not a.no_plain_fill, prompt_mode=a.prompt_mode,
                         reference=a.reference and a.method == "noob",
-                        steps=a.steps, taper=a.taper)
+                        steps=a.steps, taper=a.taper, view_fov=a.view_fov, view_px=a.view_px)
     src = np.array(Image.open(a.src).convert("RGB"))
     h, w = src.shape[:2]
     if a.long_side == "ratio":
@@ -165,12 +175,20 @@ def main(argv=None) -> int:
     print("placement: %.1f deg (%s)" % (long_side, why))
     t0 = time.time()
     r = widen.widen(src, tags, inpaint, opt, work, segment=segment)
+    seam = {"ratio_before": round(post.detail_ratio(r.pano, r.source_mask > 0), 3)}
+    if a.detail_match:
+        r.pano, seam["detail_amount"] = post.detail_match(r.pano, r.source_mask > 0)
+    if a.soften_rim:
+        r.pano = post.soften_rim(r.pano, r.source_mask > 0, a.soften_rim)
+        seam["rim_px"] = a.soften_rim
+    seam["ratio_after"] = round(post.detail_ratio(r.pano, r.source_mask > 0), 3)
     Image.fromarray(r.pano).save(work / "pano.png")
     Image.fromarray(r.source_mask).save(work / "source_mask.png")
     log = {"version": __version__, "src": a.src, "argv": sys.argv[1:] if argv is None else argv,
            "method": a.method, "cn_model": s.cn_model, "ipa_model": s.ipa_model,
            "checkpoint": a.checkpoint, "denoise": denoise,
            "placement": {"long_side": long_side, "why": why}, "depth_model": a.depth_model,
+           "seam": seam,
            "widen": r.log}
     if not a.pano_only:
         log["stereo"] = []

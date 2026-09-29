@@ -349,6 +349,8 @@ def widen(src: np.ndarray, fill_tags: list[str], inpaint: Inpainter, opt: Option
             ref = src if opt.reference else None
             zone = None
             plain_rest = None
+            ahead = None
+            grown_a = None
             if kind == "subject":
                 zone = continuation_zone(subj_v & kv, unknown, gen_mask > 0, S)
             if zone is not None and zone.any():
@@ -361,6 +363,15 @@ def widen(src: np.ndarray, fill_tags: list[str], inpaint: Inpainter, opt: Option
                 gen = inpaint(seeded, zmask, prompt, negative, opt.seed + n,
                               control=control, reference=ref, steps=steps)
                 rest = (gen_mask > 0) & ~zone
+                if segment is not None:
+                    # Where the body painted in the zone runs into the zone's far edge,
+                    # keep the strip beyond it empty for the next view to continue.
+                    # V.1: pass 2 filled it with scene, and the body stopped short.
+                    grown_a = segment(gen) & zone
+                    if grown_a.any():
+                        ahead = continuation_zone(grown_a, rest, rest, S)
+                        if ahead is not None:
+                            rest &= ~ahead
                 if where == "plain" and opt.plain_fill:
                     plain_rest = rest            # joins the one-pass plain fill below
                 elif rest.mean() > 0.005:
@@ -381,7 +392,7 @@ def widen(src: np.ndarray, fill_tags: list[str], inpaint: Inpainter, opt: Option
         if kind == "subject" and segment is not None:
             # Grow the subject only from the continuation zone, so a stray figure
             # elsewhere can never be adopted as the subject and carried on.
-            grown = segment(gen) & (gen_mask > 0)
+            grown = grown_a if grown_a is not None else segment(gen) & (gen_mask > 0)
             if zone is not None:
                 grown &= zone
             if grown.any():
@@ -389,7 +400,12 @@ def widen(src: np.ndarray, fill_tags: list[str], inpaint: Inpainter, opt: Option
                 sb, sc = sphere.back_project((grown * 255).astype(np.uint8), v.yaw, v.pitch, F,
                                              opt.width, interp=cv2.INTER_NEAREST, region=region)
                 subj[region[0], region[1]] |= (sb > 127) & sc
-        w = _feather(gen_mask, unknown, seam_px)
+        if kind == "subject" and ahead is not None and ahead.any():
+            gen_mask = gen_mask.copy()
+            gen_mask[ahead] = 0              # not pasted: it stays empty on the sphere
+            w = _feather(gen_mask, unknown & ~ahead, seam_px)
+        else:
+            w = _feather(gen_mask, unknown, seam_px)
         rows, cols = region = sphere.bounds(v.yaw, v.pitch, F, opt.width)
         img, cover = sphere.back_project(gen, v.yaw, v.pitch, F, opt.width, region=region)
         ws, _ = sphere.back_project(w, v.yaw, v.pitch, F, opt.width,
@@ -406,6 +422,8 @@ def widen(src: np.ndarray, fill_tags: list[str], inpaint: Inpainter, opt: Option
         log["views"].append({"yaw": v.yaw, "pitch": v.pitch, "new": round(v.new, 3),
                              "kind": kind, "seconds": round(secs, 1), "prompt": prompt,
                              "off_deg": round(off, 1), "steps": steps, "px": S,
+                             "reserved": round(float(ahead.mean()), 3)
+                             if kind == "subject" and ahead is not None else 0.0,
                              "negative": negative, "target_left": round(rest, 4)})
         say("view %2d yaw %4.0f pitch %4.0f %-7s %2d steps %4d px: %2.0f%% new, %.1fs, "
             "%.1f%% of target left" % (n, v.yaw, v.pitch, kind, steps, S, v.new * 100, secs,
