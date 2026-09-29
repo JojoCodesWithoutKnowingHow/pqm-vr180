@@ -63,11 +63,12 @@ class FakeForge:
     def __init__(self):
         self.calls = []
 
-    def __call__(self, image, mask, prompt, negative, seed, control=None, reference=None):
+    def __call__(self, image, mask, prompt, negative, seed, control=None, reference=None, steps=None):
         self.calls.append({"prompt": prompt, "negative": negative, "masked": float((mask > 0).mean()),
                            "control_black": None if control is None
                            else bool((control[mask > 0] == 0).all()),
-                           "reference": reference is not None})
+                           "reference": reference is not None, "steps": steps,
+                           "size": image.shape[0]})
         out = image.copy()
         out[mask > 0] = (out[mask > 0] * 0.5 + np.array([0, 60, 0])).astype(np.uint8)
         return out
@@ -254,3 +255,40 @@ def test_plain_fill_has_no_rims_patches_or_streaks():
     jump = np.maximum(np.abs(np.diff(g, axis=0))[:, :-1].max(-1), np.abs(np.diff(g, axis=1))[:-1].max(-1))
     assert np.percentile(jump[fill[:-1, :-1]], 99.9) <= 3
     assert r.log["plain_filled"] > 0.2
+
+
+def test_taper_spends_less_on_the_periphery_and_full_on_the_subject():
+    src = checker(416, 608)
+
+    def segment(rgb):
+        m = np.zeros(rgb.shape[:2], bool)
+        m[rgb.shape[0] // 2:, rgb.shape[1] // 4: 3 * rgb.shape[1] // 4] = True
+        return m
+
+    def run(taper):
+        fake = FakeForge()
+        opt = widen.Options(width=1024, view_px=256, seam_px=8, subject_tags=("1girl",),
+                            taper=True, taper_far_px=192) if taper else \
+            widen.Options(width=1024, view_px=256, seam_px=8, subject_tags=("1girl",))
+        r = widen.widen(src, ["indoors", "room"], fake, opt, None, say=lambda s: None,
+                        segment=segment)
+        return r, fake
+
+    r0, f0 = run(False)
+    assert {c["steps"] for c in f0.calls} == {28} and {c["size"] for c in f0.calls} == {256}
+    r1, f1 = run(True)
+    views = r1.log["views"]
+    assert all(v["steps"] == 28 and v["px"] == 256 for v in views if v["kind"] == "subject")
+    far = [v for v in views if v["off_deg"] > 80 and v["kind"] != "subject"]
+    assert far and all(v["steps"] < 20 and v["px"] == 192 for v in far)
+    assert all(v["steps"] == 28 for v in views if v["off_deg"] <= 40)
+    assert r1.log["front_unfilled"] < 0.002
+
+
+def test_taper_schedule():
+    opt = widen.Options(taper=True)
+    assert widen.taper_for(30, "scene", opt) == (28, 1024)
+    assert widen.taper_for(70, "scene", opt) == (19, 768)
+    assert widen.taper_for(120, "scene", opt) == (12, 768)
+    assert widen.taper_for(120, "subject", opt) == (28, 1024)
+    assert widen.taper_for(120, "scene", widen.Options()) == (28, 1024)

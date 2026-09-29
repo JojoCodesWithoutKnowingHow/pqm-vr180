@@ -59,6 +59,10 @@ def parse(argv=None):
     p.add_argument("--target", type=float, default=100.0, help="fill out to this angle off-axis")
     p.add_argument("--max-new", type=float, default=0.45)
     p.add_argument("--steps", type=int, default=28)
+    p.add_argument("--taper", action="store_true",
+                   help="foveated: views far from the source get fewer steps (28 within 40 deg, "
+                        "easing to 12 at 100) and beyond 60 deg render at 768 px; views that "
+                        "continue the subject always get full work")
     p.add_argument("--cfg", type=float, default=5.0)
     p.add_argument("--seed", type=int, default=1234)
     p.add_argument("--quality", default=prompts.QUALITY,
@@ -123,15 +127,16 @@ def main(argv=None) -> int:
         print("not ready: " + "; ".join(missing), file=sys.stderr)
         return 2
 
-    def inpaint(image, mask, prompt, negative, seed, control=None, reference=None):
+    def inpaint(image, mask, prompt, negative, seed, control=None, reference=None, steps=None):
         return f.inpaint(image, mask, prompt, negative, seed, s, control=control,
-                         reference=reference)
+                         reference=reference, steps=steps)
 
     opt = widen.Options(width=a.width, target_deg=a.target,
                         max_new=a.max_new, seed=a.seed, quality=a.quality,
                         negative=a.negative, subject_tags=subject_tags,
                         plain_fill=not a.no_plain_fill, prompt_mode=a.prompt_mode,
-                        reference=a.reference and a.method == "noob")
+                        reference=a.reference and a.method == "noob",
+                        steps=a.steps, taper=a.taper)
     src = np.array(Image.open(a.src).convert("RGB"))
     h, w = src.shape[:2]
     if a.long_side == "ratio":

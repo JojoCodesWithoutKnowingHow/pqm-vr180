@@ -125,7 +125,7 @@ class Forge:
 
     def inpaint(self, image: np.ndarray, mask: np.ndarray, prompt: str, negative: str,
                 seed: int, s: Settings, control: np.ndarray | None = None,
-                reference: np.ndarray | None = None) -> np.ndarray:
+                reference: np.ndarray | None = None, steps: int | None = None) -> np.ndarray:
         """``mask`` is uint8, 255 where to paint. ``control`` is the inpaint
         ControlNet's image (``noob``: the view with the hole pure black);
         ``reference`` the IP-Adapter's. Returns an image the size of ``image``.
@@ -136,7 +136,7 @@ class Forge:
             "prompt": prompt, "negative_prompt": negative,
             "denoising_strength": s.denoise, "inpainting_fill": 1, "mask_blur": s.mask_blur,
             "inpaint_full_res": False, "inpainting_mask_invert": 0,
-            "width": w, "height": h, "steps": s.steps, "cfg_scale": s.cfg,
+            "width": w, "height": h, "steps": steps or s.steps, "cfg_scale": s.cfg,
             "sampler_name": s.sampler, "scheduler": s.scheduler, "seed": seed,
             "override_settings": {"sd_model_checkpoint": s.checkpoint},
             "override_settings_restore_afterwards": False,

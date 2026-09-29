@@ -19,6 +19,7 @@ The rules V.0's trial and the author's verdict set:
 """
 from __future__ import annotations
 
+import math
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -34,7 +35,7 @@ from . import plan, prompts, sphere, subject
 class Inpainter(Protocol):
     def __call__(self, image: np.ndarray, mask: np.ndarray, prompt: str, negative: str,
                  seed: int, control: np.ndarray | None = None,
-                 reference: np.ndarray | None = None) -> np.ndarray: ...
+                 reference: np.ndarray | None = None, steps: int | None = None) -> np.ndarray: ...
 
 
 #: ``segment(rgb) -> bool mask`` of the subject, or None to skip subject handling.
@@ -60,6 +61,13 @@ class Options:
     plain_fill: bool = True          # plain background: extend the colour, no diffusion
     prompt_mode: str = "tags"        # "tags", or "minimal" (direction words only)
     reference: bool = False          # hand the source to the inpainter as a reference
+    steps: int = 28
+    taper: bool = False              # fewer steps and pixels far from the source (off by default)
+    #: (degrees off the source's centre, steps): full steps within the first,
+    #: easing to the last; linear between. Subject views always get full steps.
+    taper_steps: tuple = ((40.0, 28), (60.0, 22), (80.0, 16), (100.0, 12))
+    taper_far_deg: float = 60.0      # beyond this, a view renders at taper_far_px
+    taper_far_px: int = 768
 
 
 @dataclass
@@ -67,6 +75,33 @@ class Result:
     pano: np.ndarray
     source_mask: np.ndarray
     log: dict = field(default_factory=dict)
+
+
+def off_centre_deg(yaw: float, pitch: float) -> float:
+    """Angle between a view's centre and straight ahead (the source's centre)."""
+    c = math.cos(math.radians(yaw)) * math.cos(math.radians(pitch))
+    return math.degrees(math.acos(max(-1.0, min(1.0, c))))
+
+
+def taper_for(off_deg: float, kind: str, opt: "Options") -> tuple[int, int]:
+    """(steps, view pixels) for a view ``off_deg`` from the source's centre.
+    Foveated: the author's idea (V.1) -- the periphery is where a viewer looks
+    least and the headset's lenses are softest, so it gets less work."""
+    if not opt.taper or kind == "subject":
+        return opt.steps, opt.view_px
+    pts = opt.taper_steps
+    if off_deg <= pts[0][0]:
+        steps = pts[0][1]
+    elif off_deg >= pts[-1][0]:
+        steps = pts[-1][1]
+    else:
+        for (d0, s0), (d1, s1) in zip(pts, pts[1:]):
+            if d0 <= off_deg <= d1:
+                steps = s0 + (s1 - s0) * (off_deg - d0) / (d1 - d0)
+                break
+    steps = int(round(min(steps, opt.steps)))
+    px = opt.taper_far_px if off_deg > opt.taper_far_deg else opt.view_px
+    return steps, px
 
 
 def _feather(gen_mask: np.ndarray, unknown: np.ndarray, seam_px: int) -> np.ndarray:
@@ -204,7 +239,19 @@ def widen(src: np.ndarray, fill_tags: list[str], inpaint: Inpainter, opt: Option
         v = planner.next_view(small)
         if v is None:
             break
-        S, F = opt.view_px, opt.view_fov
+        F = opt.view_fov
+        # What kind of view this is, cheaply (256 px), before choosing its size:
+        # a body continued below the source can sit far off-centre and still
+        # needs full size.
+        q = 256
+        kq = sphere.view_of((known * 255).astype(np.uint8), v.yaw, v.pitch, F, q,
+                            cv2.INTER_NEAREST) > 127
+        sq = sphere.view_of((subj * 255).astype(np.uint8), v.yaw, v.pitch, F, q,
+                            cv2.INTER_NEAREST) > 127
+        pre_kind = "subject" if subject.touches(sq, ~kq, reach_px=12) else "scene"
+        off = off_centre_deg(v.yaw, v.pitch)
+        steps, S = taper_for(off, pre_kind, opt)
+        seam_px = max(4, int(round(opt.seam_px * S / opt.view_px)))
         view = sphere.view_of(pano, v.yaw, v.pitch, F, S)
         kv = sphere.view_of((known * 255).astype(np.uint8), v.yaw, v.pitch, F, S,
                             cv2.INTER_NEAREST) > 127
@@ -213,14 +260,16 @@ def widen(src: np.ndarray, fill_tags: list[str], inpaint: Inpainter, opt: Option
         if unknown.mean() < 0.002:
             break
         # Repaint a band of earlier fill for the seam, never the source.
-        band = np.ones((2 * opt.seam_px + 1,) * 2, np.uint8)
+        band = np.ones((2 * seam_px + 1,) * 2, np.uint8)
         gen_mask = cv2.dilate(unknown.astype(np.uint8) * 255, band)
         gen_mask[sv] = 0
         seeded = _seed(view, unknown)
         subj_v = sphere.view_of((subj * 255).astype(np.uint8), v.yaw, v.pitch, F, S,
                                 cv2.INTER_NEAREST) > 127
-        kind = ("subject" if subject.touches(subj_v, unknown)
+        kind = ("subject" if subject.touches(subj_v, unknown, reach_px=max(12, 48 * S // 1024))
                 else "plain" if where == "plain" and opt.plain_fill else "scene")
+        if kind == "subject" and pre_kind != "subject" and opt.taper:
+            steps = opt.steps               # the full check found the subject after all
         t0 = time.time()
         if kind == "plain":
             # Deferred: the whole plain background is filled in one pass after the
@@ -251,7 +300,8 @@ def widen(src: np.ndarray, fill_tags: list[str], inpaint: Inpainter, opt: Option
             control = seeded.copy()
             control[gen_mask > 0] = 0        # NoobAI Inpainting: the hole pure black
             gen = inpaint(seeded, gen_mask, prompt, negative, opt.seed + n,
-                          control=control, reference=src if opt.reference else None)
+                          control=control, reference=src if opt.reference else None,
+                          steps=steps)
         secs = time.time() - t0
         if kind == "subject" and segment is not None:
             grown = segment(gen) & (gen_mask > 0)
@@ -260,7 +310,7 @@ def widen(src: np.ndarray, fill_tags: list[str], inpaint: Inpainter, opt: Option
                 sb, sc = sphere.back_project((grown * 255).astype(np.uint8), v.yaw, v.pitch, F,
                                              opt.width, interp=cv2.INTER_NEAREST, region=region)
                 subj[region[0], region[1]] |= (sb > 127) & sc
-        w = _feather(gen_mask, unknown, opt.seam_px)
+        w = _feather(gen_mask, unknown, seam_px)
         rows, cols = region = sphere.bounds(v.yaw, v.pitch, F, opt.width)
         img, cover = sphere.back_project(gen, v.yaw, v.pitch, F, opt.width, region=region)
         ws, _ = sphere.back_project(w, v.yaw, v.pitch, F, opt.width,
@@ -272,9 +322,11 @@ def widen(src: np.ndarray, fill_tags: list[str], inpaint: Inpainter, opt: Option
         rest = planner.remaining(planner.small(known))
         log["views"].append({"yaw": v.yaw, "pitch": v.pitch, "new": round(v.new, 3),
                              "kind": kind, "seconds": round(secs, 1), "prompt": prompt,
+                             "off_deg": round(off, 1), "steps": steps, "px": S,
                              "negative": negative, "target_left": round(rest, 4)})
-        say("view %2d yaw %4.0f pitch %4.0f %-7s: %2.0f%% new, %.1fs, %.1f%% of target left"
-            % (n, v.yaw, v.pitch, kind, v.new * 100, secs, rest * 100))
+        say("view %2d yaw %4.0f pitch %4.0f %-7s %2d steps %4d px: %2.0f%% new, %.1fs, "
+            "%.1f%% of target left" % (n, v.yaw, v.pitch, kind, steps, S, v.new * 100, secs,
+                                       rest * 100))
         if work:
             Image.fromarray(gen).save(work / "views" / ("%02d_y%d_p%d.png" % (n, v.yaw, v.pitch)))
 
