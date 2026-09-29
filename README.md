@@ -7,75 +7,69 @@ image in, one VR180 file out**, run on a PQM pod beside Forge.
         --tags "indoors, living room, wooden floor, bookshelf" \
         --subject-tags "1girl, brown hair, white sweater, blue jeans"
 
-Proven on single images in V.1 (2026-09-28): judged by the author in a Quest 3,
-"outstanding; I can only barely see the seams when I'm looking for them".
+Proven on single images in V.1 (2026-09-28/29) and tuned for anime indoor scenes
+over five rounds, every default below judged by the author in a Quest 3.
 
-## What it does
+## What it does, and the defaults
 
-1. **Place** the source straight ahead on a sphere, its long side spanning
-   `--long-side` degrees. **Default 60.** At 90, a figure is about twice life size
-   and a continued body runs under the viewer; the author judged 60 "much better"
-   and expects it to vary by image, so it is a setting.
-2. **Widen** it to the front hemisphere plus a margin (`--target`, default 100°
-   off-axis), one perspective view at a time. The next view is always the one
-   that fills the most empty target while staying *mostly known* (`--max-new`,
-   45%), so the fill grows outward from the source's edges. Each view is an
-   img2img inpaint in Forge on the given checkpoint, conditioned on what is known:
-   - `--method noob` (default): the **NoobAI Inpainting ControlNet**, its control
-     image the view with the hole pure black, plus the source as a reference
-     through the **noobIPA MARK1** IP-Adapter (weight 0.5, steps 20-80%). This is
-     Krita AI Diffusion's expand recipe for Illustrious/NoobAI checkpoints, as is
-     the pre-fill (Navier-Stokes from the border, then blurred).
-   - `--method plain`: the checkpoint's own inpaint, for checkpoints NoobAI's
-     models do not fit (V.1 used it with RealVisXL).
-   - `--method cn`: ControlNet Union ProMax. **Broken in Forge Neo as PQM pins
-     it** (NaN in fp16, noise in bf16), kept to retry against a later Forge.
-
-   Views looking up or down are told so (ceiling or sky, floor or ground) and
-   drop the other half's tags. **The source's pixels are never rewritten**; seams
-   are blended only on the fill side.
-3. **Continue a subject the frame cuts off.** SkyTNT's anime-segmentation finds
-   the character; a view that runs up against it is prompted with
-   `--subject-tags` and without the no-people negative, and the body it paints
-   joins the subject for the next view down. Without `--subject-tags`, no body is
-   continued and every view is told "no humans".
-4. **Extend a plain background by colour**, with no diffusion (a checkpoint given
-   an empty grey floor invents objects on it). `--no-plain-fill` turns this off.
-5. **Depth, second eye and VR180** by [stereo360](https://github.com/LeonG-ZA/stereo360)
-   at a pinned commit (`--output-mode vr180 --inpaint learned`). `--strength`
-   stays at 1.0: it scales disparity on relative depth rather than the eyes'
-   separation, and above 1.0 it pinches the centre without changing how big the
-   world feels.
+1. **Place** the source straight ahead on a sphere, at the field of view **MoGe-2**
+   estimates for it (`--long-side moge`, the default: "more realistic on every
+   image"). A plain background has nothing to measure and gets 60°. **A number
+   overrides it** (`--long-side 60`), since realistic is not always the artistic
+   choice. `ratio`, `shot` and `camera` (Depth Pro) are experiments that lost.
+2. **Widen** it to the front hemisphere plus a margin, one 90°, 1024 px
+   perspective view at a time (90° beat 72°, 105° and 110° in the headset). The
+   next view is always the one that fills the most empty target while staying
+   mostly known, so the fill grows outward from the source's edges. Each view is
+   an img2img inpaint in Forge on the given checkpoint with the **NoobAI
+   Inpainting ControlNet** (hole pure black, no preprocessor) and the source as a
+   **noobIPA** reference: Krita AI Diffusion's recipe for Illustrious checkpoints.
+   Views facing up or down are told so and drop the other half's tags.
+   - **Foveated** (`--no-taper` to turn off): views far from the source get fewer
+     steps (28 → 12) and 768 px; 14-40% faster, unseen in the headset.
+   - **A cut-off subject is continued** (`--subject-tags`): anime-seg finds it; its
+     tags paint only a zone extruded from the cut edge, the rest is scene with no
+     people (no duplicates), and where the body reaches the zone's edge the strip
+     beyond is left for the next view to carry on.
+   - **A plain background** is filled in one smooth pass, with no diffusion.
+   - The source's pixels are never regenerated.
+3. **Hide the seam** (on by default): the seam is a *sharpness* step, not a colour
+   one. `--detail-match` sharpens the fill by the measured shortfall and
+   `--soften-rim 12` blends the source's outermost 12 px toward the fill (the
+   author allowed touching the edge; both together looked best).
+4. **Depth, second eye and VR180** by [stereo360](https://github.com/LeonG-ZA/stereo360)
+   at a pinned commit, with the companion's own depth normalisation: the range is
+   measured over the source's region (not the floor under the viewer), IW3's
+   foreground-scale curve at -2 (the author's IW3 setting), and Depth Anything V2
+   Base (IW3's Any_B). `--strength` stays 1.0 and `--gradient-limit` at its default
+   (0 corrupted the generated areas).
 
 Beside the output, `<stem>.work/` keeps the flat panorama, every generated view
-and `log.json`: timings, each view's direction, kind (scene, subject, plain),
-prompt and negative, and every choice the program made on its own with the reason.
+and `log.json`: timings, each view's direction, kind, steps, size and prompt, the
+placement and why, and the seam measurements.
 
 ## On a pod
 
 `setup/pod_setup.sh all` installs and verifies everything, given PQM's pod image
 (Forge Neo at `:7860`) and this repo at `/workspace/pqm-vr180`: the companion's
-venv (numpy, OpenCV, Pillow, onnxruntime), stereo360 at its commit (warmed, so
-Depth Pro and LaMa are fetched at install), and four sha256-pinned models:
-NoobAI Inpainting (2.5 GB), noobIPA MARK1 (1.4 GB), CLIP-ViT-bigG (3.7 GB) and
-anime-seg (176 MB). The checkpoint is the pod's business (PQM provisions it).
-Two things about that image, both measured in V.1:
+venv, stereo360 (warmed), MoGe-2 in its own venv (warmed), and four sha256-pinned
+models (NoobAI Inpainting, noobIPA MARK1, CLIP-ViT-bigG, anime-seg). The
+checkpoint and any style LoRA are the pod's business (PQM provisions them). Two
+things about that image, measured in V.1:
 
-- **Download into `models/` only after Forge answers.** The image's entrypoint
-  replaces `models/` with a symlink partway through boot; a file written before
-  that is deleted.
+- **Download into `models/` only after Forge answers**: the entrypoint replaces
+  `models/` with a symlink partway through boot.
 - **ControlNet models must be in place before Forge starts**, or Forge restarted
-  after they land: Forge lists `models/ControlNet` once, at startup, and its API
-  has no refresh. `pod_setup.sh models` says so by name when it happens.
+  after they land: it lists them once, at startup.
 
-Measured (V.1, RTX 5090): install about 7 minutes after Forge answers; an image
-80-120 s (10-11 views at 6.5 s, about 13 s of CPU, 9 s of stereo), about $0.03.
+Measured on an RTX 4090: install about 5-6 minutes after Forge answers; an image
+2-4 minutes with a subject to continue, under a minute for a plain background.
 
 ## Tests
 
     py -3.13 -m venv .venv && .venv/Scripts/pip install -r requirements.txt pytest
     .venv/Scripts/python -m pytest
 
-They run offline with a fake Forge: geometry, planning, that a widening fills the
-front and leaves every source pixel exactly as placed, subject continuation,
-plain fill, and the Forge payloads.
+55 offline tests with a fake Forge: geometry, planning, source preservation,
+subject continuation, plain fill, the taper, the depth curve and normalisation,
+placement, the seam remedies and the Forge payloads.
