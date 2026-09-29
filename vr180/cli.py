@@ -72,12 +72,13 @@ def parse(argv=None):
                    help="each view's field of view; narrower views put more pixels on each "
                         "degree (sharper fill, more views)")
     p.add_argument("--view-px", type=int, default=1024)
-    p.add_argument("--detail-match", action="store_true",
-                   help="sharpen the fill to the source's fine-detail level (the seam V.1 saw "
-                        "was a sharpness step)")
-    p.add_argument("--soften-rim", type=int, default=0, metavar="PX",
-                   help="soften the source's outermost PX pixels toward the fill (touches the "
-                        "source's edge; the author allowed it)")
+    # Both on by default: the author judged detail match + rim softening the best at the
+    # seam in the headset (V.1, round 3). The seam was a sharpness step, not a colour one.
+    p.add_argument("--no-detail-match", dest="detail_match", action="store_false",
+                   help="do not sharpen the fill to the source's fine-detail level")
+    p.add_argument("--soften-rim", type=int, default=12, metavar="PX",
+                   help="soften the source's outermost PX pixels toward the fill (default 12; "
+                        "0 turns it off; touches the source's edge, which the author allowed)")
     p.add_argument("--cfg", type=float, default=5.0)
     p.add_argument("--seed", type=int, default=1234)
     p.add_argument("--quality", default=prompts.QUALITY,
