@@ -104,6 +104,55 @@ def taper_for(off_deg: float, kind: str, opt: "Options") -> tuple[int, int]:
     return steps, px
 
 
+def continuation_zone(subj_known: np.ndarray, unknown: np.ndarray, hole: np.ndarray,
+                      S: int, source: np.ndarray | None = None) -> np.ndarray | None:
+    """Where a view continues the subject: the empty pixels just past its cut edge,
+    extruded *outward* from the side of the frame that cut it (legs cut at the
+    bottom continue downward, within the body's width plus a small margin). The
+    reach follows the cut's width, clamped to [64 px, 25% of the view]; the body
+    goes on in the next view as the painted part joins the subject.
+
+    V.1: a round zone spreading from every cut edge reached deep into the room
+    beside the character and invited a duplicate there."""
+    edge = subj_known & (cv2.dilate(unknown.astype(np.uint8), np.ones((5, 5), np.uint8)) > 0)
+    if edge.sum() < 8:
+        return None
+    ys, xs = np.nonzero(edge)
+    span = max(xs.max() - xs.min(), ys.max() - ys.min()) + 1
+    r = int(np.clip(0.5 * span, 64, 0.25 * S))
+    # Each edge pixel goes the way the emptiness is: legs cut at the bottom go down,
+    # an arm cut at the side goes sideways, each on its own (V.1: a majority vote
+    # sent Tifa's cut torso sideways because her arms left the frame).
+    u = unknown
+    step = 3
+    shift = {"down": np.zeros_like(u), "up": np.zeros_like(u),
+             "right": np.zeros_like(u), "left": np.zeros_like(u)}
+    shift["down"][:-step] = u[step:]
+    shift["up"][step:] = u[:-step]
+    shift["right"][:, :-step] = u[:, step:]
+    shift["left"][:, step:] = u[:, :-step]
+    zone = np.zeros(edge.shape, bool)
+    for d, empty_that_way in shift.items():
+        e = (edge & empty_that_way).astype(np.uint8)
+        if e.sum() < 4:
+            continue
+        # A one-sided kernel: OpenCV's dilation extends *opposite* to where the
+        # kernel's ones lie (ones in the top half reach down; checked in V.1).
+        line = np.zeros(2 * r + 1, np.uint8)
+        if d in ("down", "right"):
+            line[:r + 1] = 1
+        else:
+            line[r:] = 1
+        k = line[:, None] if d in ("down", "up") else line[None, :]
+        ext = cv2.dilate(e, k)                                 # one-sided extrusion
+        m = max(4, r // 4)                                     # a small side margin
+        ext = cv2.dilate(ext, np.ones((1, 2 * m + 1) if d in ("down", "up") else (2 * m + 1, 1),
+                                      np.uint8))
+        zone |= ext > 0
+    zone &= hole
+    return zone if zone.any() else None
+
+
 def _feather(gen_mask: np.ndarray, unknown: np.ndarray, seam_px: int) -> np.ndarray:
     """Blend weight in the view: 1 over what was empty, ramping to 0 across the
     band of earlier fill that the view was allowed to repaint."""
@@ -297,14 +346,44 @@ def widen(src: np.ndarray, fill_tags: list[str], inpaint: Inpainter, opt: Option
             else:
                 prompt = prompts.view_prompt(fill_tags, where, v.pitch, opt.quality)
                 negative = prompts.view_negative(opt.negative, where, v.pitch)
-            control = seeded.copy()
-            control[gen_mask > 0] = 0        # NoobAI Inpainting: the hole pure black
-            gen = inpaint(seeded, gen_mask, prompt, negative, opt.seed + n,
-                          control=control, reference=src if opt.reference else None,
-                          steps=steps)
+            ref = src if opt.reference else None
+            zone = None
+            plain_rest = None
+            if kind == "subject":
+                zone = continuation_zone(subj_v & kv, unknown, gen_mask > 0, S)
+            if zone is not None and zone.any():
+                # Two passes (V.1: a view that only grazed the character was given her
+                # tags for its whole hole, and painted her again). Her tags paint only
+                # the zone continuing her cut edge; the rest is scene, no people.
+                zmask = (zone * 255).astype(np.uint8)
+                control = seeded.copy()
+                control[zone] = 0            # NoobAI Inpainting: the hole pure black
+                gen = inpaint(seeded, zmask, prompt, negative, opt.seed + n,
+                              control=control, reference=ref, steps=steps)
+                rest = (gen_mask > 0) & ~zone
+                if where == "plain" and opt.plain_fill:
+                    plain_rest = rest            # joins the one-pass plain fill below
+                elif rest.mean() > 0.005:
+                    scene_prompt = prompts.view_prompt(fill_tags, where, v.pitch, opt.quality)
+                    scene_negative = prompts.view_negative(opt.negative, where, v.pitch)
+                    control = gen.copy()
+                    control[rest] = 0
+                    gen = inpaint(gen, (rest * 255).astype(np.uint8), scene_prompt,
+                                  scene_negative, opt.seed + n + 1000, control=control,
+                                  reference=ref, steps=steps)
+                    prompt = prompt + "  ||  " + scene_prompt
+            else:
+                control = seeded.copy()
+                control[gen_mask > 0] = 0    # NoobAI Inpainting: the hole pure black
+                gen = inpaint(seeded, gen_mask, prompt, negative, opt.seed + n,
+                              control=control, reference=ref, steps=steps)
         secs = time.time() - t0
         if kind == "subject" and segment is not None:
+            # Grow the subject only from the continuation zone, so a stray figure
+            # elsewhere can never be adopted as the subject and carried on.
             grown = segment(gen) & (gen_mask > 0)
+            if zone is not None:
+                grown &= zone
             if grown.any():
                 region = sphere.bounds(v.yaw, v.pitch, F, opt.width)
                 sb, sc = sphere.back_project((grown * 255).astype(np.uint8), v.yaw, v.pitch, F,
@@ -319,6 +398,10 @@ def widen(src: np.ndarray, fill_tags: list[str], inpaint: Inpainter, opt: Option
         sub = pano[rows][:, cols]
         pano[rows, cols] = (sub * (1 - ws[..., None]) + img * ws[..., None]).round().astype(np.uint8)
         known[rows, cols] |= ws > 0.5
+        if kind == "subject" and plain_rest is not None and plain_rest.any():
+            pr, pc = sphere.back_project((plain_rest * 255).astype(np.uint8), v.yaw, v.pitch, F,
+                                         opt.width, interp=cv2.INTER_NEAREST, region=region)
+            deferred[rows, cols] |= (pr > 127) & pc & ~source[rows][:, cols]
         rest = planner.remaining(planner.small(known))
         log["views"].append({"yaw": v.yaw, "pitch": v.pitch, "new": round(v.new, 3),
                              "kind": kind, "seconds": round(secs, 1), "prompt": prompt,

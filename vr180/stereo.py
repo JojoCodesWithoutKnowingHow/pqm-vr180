@@ -38,6 +38,32 @@ class Depth:
         return shlex.split(text) if text else []
 
 
+def estimate_camera(src: Path, *, python: str, checkout: str, subject=None,
+                    work: Path | None = None, timeout: float = 600) -> dict:
+    """Depth Pro's estimate of the source's camera (``vr180.estimate``), or
+    ``{"error": ...}`` when it cannot be had; never raises."""
+    import json
+    work = work or src.parent
+    out = work / "camera.json"
+    cmd = [python, "-m", "vr180.estimate", str(src), str(out)]
+    if subject is not None:
+        import numpy as np
+        from PIL import Image
+        mask = work / "subject_mask.png"
+        Image.fromarray((np.asarray(subject) * 255).astype("uint8")).save(mask)
+        cmd += ["--subject", str(mask)]
+    env = dict(os.environ, PYTHONPATH=os.pathsep.join(
+        [checkout, str(HERE)] + [p for p in [os.environ.get("PYTHONPATH")] if p]))
+    try:
+        r = subprocess.run(cmd, cwd=checkout, capture_output=True, text=True, timeout=timeout,
+                           env=env)
+        if r.returncode != 0 or not out.exists():
+            return {"error": (r.stderr or r.stdout)[-600:]}
+        return json.loads(out.read_text(encoding="utf-8"))
+    except Exception as exc:  # an estimate must never stop a run
+        return {"error": str(exc)[-600:]}
+
+
 def to_vr180(pano: Path, out: Path, *, python: str, checkout: str, depth: Depth | None = None,
              source_mask: Path | None = None, inpaint: str = "learned",
              timeout: float = 1800) -> dict:

@@ -35,6 +35,19 @@ def by_ratio(w: int, h: int) -> tuple[float, str]:
     return 60.0, "ratio %.2f" % r
 
 
+def by_camera(w: int, h: int, est: dict | None) -> tuple[float, str]:
+    """The source's own field of view, as Depth Pro estimated it: placing the image
+    at the angle its camera saw reproduces that camera's geometry. Falls back to 60."""
+    if not est or "focal_px" not in est:
+        why = str((est or {}).get("error", "no estimate")).strip().splitlines()
+        return 60.0, "camera estimate failed (%s); 60" % (why[-1] if why else "?")
+    deg = math.degrees(2 * math.atan(max(w, h) / (2 * est["focal_px"])))
+    clamped = float(np.clip(deg, *LIMITS))
+    dist = (", subject %.1f m" % est["subject_m"]) if "subject_m" in est else ""
+    return clamped, "camera: focal %.0f px%s -> long side %.1f deg%s" % (
+        est["focal_px"], dist, deg, "" if clamped == deg else " (clamped to %g)" % clamped)
+
+
 def by_shot(w: int, h: int, seg: np.ndarray | None, cut: list[str]) -> tuple[float, str]:
     """Size a figure the frame shows whole to ``PERSON_M`` at ``DISTANCE_M``.
 

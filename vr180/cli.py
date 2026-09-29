@@ -21,6 +21,9 @@ from PIL import Image
 from . import __version__, forge, placement, prompts, stereo, widen
 
 SEG_MODEL = "/workspace/models/anime-seg/isnetis.onnx"
+DEPTH_MODELS = {"any-b": ["--depth-backend", "depth-anything"],
+                "depth-pro": ["--depth-backend", "depth-pro"],
+                "da3": ["--depth-backend", "depth-anything-v3"]}
 
 
 def parse(argv=None):
@@ -54,7 +57,8 @@ def parse(argv=None):
                    help="degrees the source's long side spans (default 60: at 90 a figure is "
                         "about twice life size and its body runs under the viewer; V.1, judged "
                         "in a headset). 'ratio': by aspect ratio; 'shot': size a whole figure to "
-                        "life size at 2 m, else by ratio")
+                        "life size at 2 m, else by ratio; 'camera': the field of view Depth Pro "
+                        "estimates for the image (V.1 experiment; 60 if it fails)")
     p.add_argument("--width", type=int, default=4096, help="equirect width (VR180 is W/2 per eye)")
     p.add_argument("--target", type=float, default=100.0, help="fill out to this angle off-axis")
     p.add_argument("--max-new", type=float, default=0.45)
@@ -76,14 +80,19 @@ def parse(argv=None):
                         "disparity on relative depth, not the eyes' separation: above 1.0 it "
                         "pinches the centre and pulls focus close without changing how big the "
                         "world feels (V.1, in a headset). Leave it at 1.0")
-    p.add_argument("--depth-norm", choices=("global", "region"), default="global",
-                   help="where the depth range is measured: stereo360's whole sphere, or the "
-                        "source's region (the floor under the viewer then stops taking it)")
-    p.add_argument("--fg-scale", type=float, default=0.0,
-                   help="IW3's foreground scale, -3..3 (the author's IW3 uses -2)")
+    # Defaults from the author's headset (V.1 tuning): region + -2 + Depth Anything V2
+    # Base gave the characters the best depth; --gradient-limit 0 corrupted the
+    # generated areas; --depth-tiles made no difference with Depth Pro.
+    p.add_argument("--depth-norm", choices=("global", "region"), default="region",
+                   help="where the depth range is measured: the source's region (default; the "
+                        "floor under the viewer then stops taking it) or stereo360's whole sphere")
+    p.add_argument("--fg-scale", type=float, default=-2.0,
+                   help="IW3's foreground scale, -3..3 (default -2, the author's IW3 setting)")
     p.add_argument("--knee", type=float, default=0.85)
-    p.add_argument("--stereo-args", default="",
-                   help="more stereo360 arguments, e.g. \"--depth-backend depth-anything\"")
+    p.add_argument("--depth-model", choices=tuple(DEPTH_MODELS), default="any-b",
+                   help="stereo360's depth model: Depth Anything V2 Base (default; IW3's Any_B), "
+                        "Apple Depth Pro, or Depth Anything V3")
+    p.add_argument("--stereo-args", default="", help="more stereo360 arguments, passed as they are")
     p.add_argument("--stereo-python", default="/workspace/venvs/stereo360/bin/python")
     p.add_argument("--stereo-dir", default="/workspace/stereo360")
     p.add_argument("--pano-only", action="store_true", help="stop before stereo")
@@ -117,7 +126,7 @@ def main(argv=None) -> int:
                        denoise=denoise)
     missing = f.resolve(s)
     segment = None
-    if subject_tags or a.long_side == "shot":
+    if subject_tags or a.long_side in ("shot", "camera"):
         if not Path(a.segment_model).exists():
             missing.append("no segmentation model at %s" % a.segment_model)
         else:
@@ -144,6 +153,11 @@ def main(argv=None) -> int:
     elif a.long_side == "shot":
         seg = segment(src) if segment else None
         long_side, why = placement.by_shot(w, h, seg, widen._cut_edges(seg) if seg is not None else [])
+    elif a.long_side == "camera":
+        seg = segment(src) if segment else None
+        est = stereo.estimate_camera(Path(a.src), python=a.stereo_python, checkout=a.stereo_dir,
+                                     subject=seg, work=work)
+        long_side, why = placement.by_camera(w, h, est)
     else:
         long_side, why = float(a.long_side), "given"
     opt.long_side = long_side
@@ -155,14 +169,16 @@ def main(argv=None) -> int:
     log = {"version": __version__, "src": a.src, "argv": sys.argv[1:] if argv is None else argv,
            "method": a.method, "cn_model": s.cn_model, "ipa_model": s.ipa_model,
            "checkpoint": a.checkpoint, "denoise": denoise,
-           "placement": {"long_side": long_side, "why": why}, "widen": r.log}
+           "placement": {"long_side": long_side, "why": why}, "depth_model": a.depth_model,
+           "widen": r.log}
     if not a.pano_only:
         log["stereo"] = []
         for i, value in enumerate(v.strip() for v in a.strength.split(",") if v.strip()):
             target = _strength_out(out, value, i == 0)
             depth = stereo.Depth(norm=a.depth_norm, knee=a.knee, fg_scale=a.fg_scale,
                                  strength=float(value),
-                                 extra=stereo.Depth.parse_extra(a.stereo_args))
+                                 extra=[*DEPTH_MODELS[a.depth_model],
+                                        *stereo.Depth.parse_extra(a.stereo_args)])
             info = stereo.to_vr180(work / "pano.png", target, python=a.stereo_python,
                                    checkout=a.stereo_dir, depth=depth,
                                    source_mask=work / "source_mask.png")

@@ -198,10 +198,13 @@ def test_a_subject_cut_by_the_frame_is_continued(tmp_path):
     assert r.log["subject"]["cut_at"] == ["bottom"]
     kinds = [v["kind"] for v in r.log["views"]]
     assert "subject" in kinds and "plain" in kinds
+    # On a plain background, only the continuation zone is diffused, with her tags;
+    # the rest of a subject view joins the one-pass plain fill.
     subj = [c for c in fake.calls]
     assert subj and all(c["prompt"].split(", ")[5] == "1girl" for c in subj)
     assert all("no humans" not in c["prompt"] and "1girl" not in c["negative"] for c in subj)
     assert all(c["control_black"] and c["reference"] for c in subj)
+    assert all(c["masked"] < 0.6 for c in subj)
     down = [v for v in r.log["views"] if v["kind"] == "subject"]
     assert min(v["pitch"] for v in down) < 0          # it went on below the frame
 
@@ -292,3 +295,39 @@ def test_taper_schedule():
     assert widen.taper_for(120, "scene", opt) == (12, 768)
     assert widen.taper_for(120, "subject", opt) == (28, 1024)
     assert widen.taper_for(120, "scene", widen.Options()) == (28, 1024)
+
+
+
+def test_subject_views_paint_the_character_only_in_the_continuation_zone():
+    # A scene (not plain): a subject view paints her tags in the zone by her cut
+    # edge, then the rest of the hole as scene with no people -- never her tags
+    # across the whole hole (V.1: that painted duplicates).
+    src = checker(416, 608)
+
+    def segment(rgb):
+        m = np.zeros(rgb.shape[:2], bool)
+        m[rgb.shape[0] // 2:, rgb.shape[1] * 2 // 5: rgb.shape[1] * 3 // 5] = True
+        return m
+
+    fake = FakeForge()
+    opt = widen.Options(width=1024, view_px=256, seam_px=8, subject_tags=("1girl", "skirt"))
+    r = widen.widen(src, ["indoors", "room"], fake, opt, None, say=lambda s: None, segment=segment)
+    her = [c for c in fake.calls if "1girl" in c["prompt"].split(", ")]
+    scene = [c for c in fake.calls if "no humans" in c["prompt"]]
+    assert her and scene
+    assert all("1girl" in c["negative"] for c in scene)
+    assert max(c["masked"] for c in her) < 0.45          # a zone, never the whole hole
+    assert r.log["front_unfilled"] < 0.002
+
+
+def test_continuation_zone_follows_the_cut_width():
+    S = 256
+    known = np.zeros((S, S), bool)
+    known[:128] = True
+    subj = np.zeros((S, S), bool)
+    subj[60:128, 110:146] = True                          # a 36 px wide body, cut at row 128
+    z = widen.continuation_zone(subj, ~known, ~known, S)
+    assert z is not None and z[128:].any() and not z[:128].any()
+    cols = np.flatnonzero(z.any(0))
+    assert cols[0] > 40 and cols[-1] < 216               # near the body, not the whole width
+    assert widen.continuation_zone(np.zeros_like(subj), ~known, ~known, S) is None

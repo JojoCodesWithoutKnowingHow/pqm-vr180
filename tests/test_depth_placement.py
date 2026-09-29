@@ -80,3 +80,13 @@ def test_shot_sizes_a_whole_figure_and_falls_back_when_cut():
     deg, why = placement.by_shot(832, 1216, seg, ["bottom"])
     assert deg == placement.by_ratio(832, 1216)[0] and "cut at bottom" in why
     assert "no subject" in placement.by_shot(832, 1216, None, [])[1]
+
+
+def test_camera_placement_uses_the_estimated_focal_length_and_falls_back():
+    # A 1024-wide image seen through a focal length of 512 px spans 90 degrees.
+    deg, why = placement.by_camera(1024, 768, {"focal_px": 512.0, "subject_m": 1.8})
+    assert deg == pytest.approx(90.0, abs=0.01) and "1.8 m" in why
+    assert placement.by_camera(1024, 768, {"focal_px": 5000.0})[0] == placement.LIMITS[0]
+    deg, why = placement.by_camera(1024, 768, {"error": "Traceback...\nOSError: no model"})
+    assert deg == 60.0 and "OSError: no model" in why
+    assert placement.by_camera(1024, 768, None)[0] == 60.0
