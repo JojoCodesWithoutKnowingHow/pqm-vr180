@@ -272,7 +272,7 @@ def test_taper_spends_less_on_the_periphery_and_full_on_the_subject():
         fake = FakeForge()
         opt = widen.Options(width=1024, view_px=256, seam_px=8, subject_tags=("1girl",),
                             taper=True, taper_far_px=192) if taper else \
-            widen.Options(width=1024, view_px=256, seam_px=8, subject_tags=("1girl",))
+            widen.Options(width=1024, view_px=256, seam_px=8, subject_tags=("1girl",), taper=False)
         r = widen.widen(src, ["indoors", "room"], fake, opt, None, say=lambda s: None,
                         segment=segment)
         return r, fake
@@ -294,7 +294,8 @@ def test_taper_schedule():
     assert widen.taper_for(70, "scene", opt) == (19, 768)
     assert widen.taper_for(120, "scene", opt) == (12, 768)
     assert widen.taper_for(120, "subject", opt) == (28, 1024)
-    assert widen.taper_for(120, "scene", widen.Options()) == (28, 1024)
+    assert widen.taper_for(120, "scene", widen.Options(taper=False)) == (28, 1024)
+    assert widen.Options().taper                     # on by default (V.1)
 
 
 

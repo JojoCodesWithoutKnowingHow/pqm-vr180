@@ -63,10 +63,11 @@ def parse(argv=None):
     p.add_argument("--target", type=float, default=100.0, help="fill out to this angle off-axis")
     p.add_argument("--max-new", type=float, default=0.45)
     p.add_argument("--steps", type=int, default=28)
-    p.add_argument("--taper", action="store_true",
-                   help="foveated: views far from the source get fewer steps (28 within 40 deg, "
-                        "easing to 12 at 100) and beyond 60 deg render at 768 px; views that "
-                        "continue the subject always get full work")
+    p.add_argument("--no-taper", dest="taper", action="store_false",
+                   help="turn off the foveated taper (on by default: views far from the source "
+                        "get fewer steps, 28 within 40 deg easing to 12 at 100, and render at "
+                        "768 px beyond 60 deg; subject views always get full work). V.1: 14-30%% "
+                        "faster per image, and the author could not see it in the headset")
     p.add_argument("--cfg", type=float, default=5.0)
     p.add_argument("--seed", type=int, default=1234)
     p.add_argument("--quality", default=prompts.QUALITY,

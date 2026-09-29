@@ -62,7 +62,7 @@ class Options:
     prompt_mode: str = "tags"        # "tags", or "minimal" (direction words only)
     reference: bool = False          # hand the source to the inpainter as a reference
     steps: int = 28
-    taper: bool = False              # fewer steps and pixels far from the source (off by default)
+    taper: bool = True               # fewer steps and pixels far from the source (V.1: unseen)
     #: (degrees off the source's centre, steps): full steps within the first,
     #: easing to the last; linear between. Subject views always get full steps.
     taper_steps: tuple = ((40.0, 28), (60.0, 22), (80.0, 16), (100.0, 12))
