@@ -53,13 +53,12 @@ def parse(argv=None):
                    help="default: 1.0 for noob, 0.95 otherwise")
     p.add_argument("--cn-model", default="", help="the inpaint ControlNet's name")
     p.add_argument("--forge", default="http://127.0.0.1:7860")
-    p.add_argument("--long-side", default="60",
-                   help="degrees the source's long side spans (default 60: at 90 a figure is "
-                        "about twice life size and its body runs under the viewer; V.1, judged "
-                        "in a headset). 'ratio': by aspect ratio; 'shot': size a whole figure to "
-                        "life size at 2 m, else by ratio; 'camera': the field of view Depth Pro "
-                        "estimates for the image; 'moge': the one MoGe-2 estimates (V.1 "
-                        "experiments; 60 if they fail)")
+    p.add_argument("--long-side", default="moge",
+                   help="degrees the source's long side spans. Default 'moge': the field of view "
+                        "MoGe-2 estimates for the image (the author: more realistic on every "
+                        "image, V.1), or 60 when it fails or the background is plain (nothing to "
+                        "measure). A number overrides it -- realistic is not always the artistic "
+                        "choice. Also 'ratio', 'shot', and 'camera' (Depth Pro), all experiments")
     p.add_argument("--width", type=int, default=4096, help="equirect width (VR180 is W/2 per eye)")
     p.add_argument("--target", type=float, default=100.0, help="fill out to this angle off-axis")
     p.add_argument("--max-new", type=float, default=0.45)
@@ -168,6 +167,9 @@ def main(argv=None) -> int:
     elif a.long_side == "shot":
         seg = segment(src) if segment else None
         long_side, why = placement.by_shot(w, h, seg, widen._cut_edges(seg) if seg is not None else [])
+    elif a.long_side == "moge" and prompts.setting(tags)[0] == "plain":
+        # A plain background gives MoGe nothing to measure (V.1: 34 deg on a_plain).
+        long_side, why = 60.0, "plain background, nothing for MoGe to measure; 60"
     elif a.long_side == "moge":
         est = stereo.estimate_moge(Path(a.src), python=a.est_python, work=work)
         long_side, why = placement.by_moge(w, h, est)

@@ -116,3 +116,9 @@ def test_moge_placement_takes_the_long_side_and_falls_back():
     assert placement.by_moge(832, 1216, {"hfov": 55.8, "vfov": 75.4})[0] == pytest.approx(75.4)
     assert placement.by_moge(1024, 1024, {"hfov": 120.0, "vfov": 120.0})[0] == placement.LIMITS[1]
     assert placement.by_moge(1024, 1024, {"error": "x\nOSError: no model"}) == (60.0, "moge estimate failed (OSError: no model); 60")
+
+
+def test_moge_is_the_default_placement_and_a_number_overrides_it():
+    from vr180.cli import parse
+    assert parse(["s.png", "-o", "o.jpg", "--checkpoint", "c"]).long_side == "moge"
+    assert parse(["s.png", "-o", "o.jpg", "--checkpoint", "c", "--long-side", "70"]).long_side == "70"

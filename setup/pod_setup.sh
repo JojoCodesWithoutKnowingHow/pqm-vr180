@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Install what vr180 needs on a PQM pod (Forge Neo already running at :7860).
 #
-#   pod_setup.sh companion|stereo360|models|promax|verify|all
+#   pod_setup.sh companion|stereo360|models|moge|promax|verify|all
 #
 # Each part is verified before it prints "SETUP <part> OK"; a part that cannot be
 # verified exits non-zero, which is what a bootstrap should read as failure.
@@ -24,6 +24,9 @@ SEG_DIR=${SEG_DIR:-/workspace/models/anime-seg}
 STEREO360_REPO=https://github.com/LeonG-ZA/stereo360
 STEREO360_REF=23d1e256a8562fe7ebaf55dc41c809a8f43e774b
 STEREO360_DIR=${STEREO360_DIR:-/workspace/stereo360}
+# MoGe (Microsoft, MIT), pinned at the commit that was HEAD when V.1 made it the default
+# placement (V.1's tests ran main at about this point); the model is Ruicheng/moge-2-vitl.
+MOGE_REF=${MOGE_REF:-74fbce054ebed49800de42d0ad0e83495065719a}
 
 HF=https://huggingface.co
 CN="$FORGE_DIR/models/ControlNet"
@@ -106,6 +109,21 @@ models() {
   done
 }
 
+moge() {
+  # MoGe-2 for the default placement, in its own venv (torch), warmed so the model
+  # downloads at install. The author made it the default placement (V.1).
+  uv venv --allow-existing -q -p 3.12 "$VENVS/est"
+  timeout 900 uv pip install -q -p "$VENVS/est/bin/python" torch torchvision numpy pillow     opencv-python-headless "git+https://github.com/microsoft/MoGe.git@$MOGE_REF"
+  "$VENVS/est/bin/python" - <<'EOF'
+import numpy as np
+from PIL import Image
+y, x = np.mgrid[0:256, 0:384]
+Image.fromarray(np.dstack([(x % 256), (y % 256), ((x + y) % 256)]).astype(np.uint8)).save("/tmp/moge_warm.png")
+EOF
+  (cd "$VR180_DIR" && PYTHONPATH="$VR180_DIR" "$VENVS/est/bin/python" -m vr180.estimate_alt --only moge      /tmp/moge_warm.json /tmp/moge_warm.png) | grep -q '"hfov"' || { echo "MoGe did not estimate"; exit 6; }
+  echo "moge warm"
+}
+
 promax() {
   fetch "$PROMAX"
   listed controlnet-union-sdxl-promax \
@@ -124,8 +142,8 @@ verify() {
 }
 
 case "${1:-all}" in
-  companion|stereo360|models|promax|verify) "$1" ;;
-  all) companion; stereo360; models; verify ;;
-  *) echo "usage: $0 companion|stereo360|models|promax|verify|all"; exit 2 ;;
+  companion|stereo360|models|moge|promax|verify) "$1" ;;
+  all) companion; stereo360; models; moge; verify ;;
+  *) echo "usage: $0 companion|stereo360|models|moge|promax|verify|all"; exit 2 ;;
 esac
 echo "SETUP ${1:-all} OK"
