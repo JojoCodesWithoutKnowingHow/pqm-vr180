@@ -109,3 +109,10 @@ def test_detail_match_and_rim_bring_the_seam_ratio_toward_one():
     rimmed = post.soften_rim(pano, source, 12)
     assert np.array_equal(rimmed[~source], pano[~source])   # the rim touches only the source
     assert np.array_equal(rimmed[130:270, 130:270], pano[130:270, 130:270])
+
+
+def test_moge_placement_takes_the_long_side_and_falls_back():
+    assert placement.by_moge(1344, 768, {"hfov": 58.4, "vfov": 35.4})[0] == pytest.approx(58.4)
+    assert placement.by_moge(832, 1216, {"hfov": 55.8, "vfov": 75.4})[0] == pytest.approx(75.4)
+    assert placement.by_moge(1024, 1024, {"hfov": 120.0, "vfov": 120.0})[0] == placement.LIMITS[1]
+    assert placement.by_moge(1024, 1024, {"error": "x\nOSError: no model"}) == (60.0, "moge estimate failed (OSError: no model); 60")

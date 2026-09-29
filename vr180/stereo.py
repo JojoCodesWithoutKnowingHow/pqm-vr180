@@ -64,6 +64,26 @@ def estimate_camera(src: Path, *, python: str, checkout: str, subject=None,
         return {"error": str(exc)[-600:]}
 
 
+def estimate_moge(src: Path, *, python: str, work: Path | None = None,
+                  timeout: float = 600) -> dict:
+    """MoGe-2's estimate of the source's camera (``vr180.estimate_alt --only moge``,
+    in its own venv), or ``{"error": ...}``; never raises."""
+    import json
+    work = work or src.parent
+    out = work / "moge.json"
+    env = dict(os.environ, PYTHONPATH=os.pathsep.join(
+        [str(HERE)] + [p for p in [os.environ.get("PYTHONPATH")] if p]))
+    try:
+        r = subprocess.run([python, "-m", "vr180.estimate_alt", "--only", "moge", str(out), str(src)],
+                           cwd=str(HERE), capture_output=True, text=True, timeout=timeout, env=env)
+        if r.returncode != 0 or not out.exists():
+            return {"error": (r.stderr or r.stdout)[-600:]}
+        return json.loads(out.read_text(encoding="utf-8")).get(str(src), {}).get(
+            "moge", {"error": "no result"})
+    except Exception as exc:  # an estimate must never stop a run
+        return {"error": str(exc)[-600:]}
+
+
 def to_vr180(pano: Path, out: Path, *, python: str, checkout: str, depth: Depth | None = None,
              source_mask: Path | None = None, inpaint: str = "learned",
              timeout: float = 1800) -> dict:

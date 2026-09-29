@@ -48,6 +48,20 @@ def by_camera(w: int, h: int, est: dict | None) -> tuple[float, str]:
         est["focal_px"], dist, deg, "" if clamped == deg else " (clamped to %g)" % clamped)
 
 
+def by_moge(w: int, h: int, est: dict | None) -> tuple[float, str]:
+    """The source's field of view as MoGe-2 estimated it (V.1: the steadiest of three
+    estimators on anime -- 57-79 deg on every character scene, 94 on a fisheye).
+    Falls back to 60 when there is no estimate."""
+    if not est or "hfov" not in est:
+        why = str((est or {}).get("error", "no estimate")).strip().splitlines()
+        return 60.0, "moge estimate failed (%s); 60" % (why[-1] if why else "?")
+    deg = est["hfov"] if w >= h else est["vfov"]
+    clamped = float(np.clip(deg, *LIMITS))
+    dist = (", median %.1f m" % est["median_m"]) if "median_m" in est else ""
+    return clamped, "moge: long side %.1f deg%s%s" % (
+        deg, dist, "" if clamped == deg else " (clamped to %g)" % clamped)
+
+
 def by_shot(w: int, h: int, seg: np.ndarray | None, cut: list[str]) -> tuple[float, str]:
     """Size a figure the frame shows whole to ``PERSON_M`` at ``DISTANCE_M``.
 

@@ -58,7 +58,8 @@ def parse(argv=None):
                         "about twice life size and its body runs under the viewer; V.1, judged "
                         "in a headset). 'ratio': by aspect ratio; 'shot': size a whole figure to "
                         "life size at 2 m, else by ratio; 'camera': the field of view Depth Pro "
-                        "estimates for the image (V.1 experiment; 60 if it fails)")
+                        "estimates for the image; 'moge': the one MoGe-2 estimates (V.1 "
+                        "experiments; 60 if they fail)")
     p.add_argument("--width", type=int, default=4096, help="equirect width (VR180 is W/2 per eye)")
     p.add_argument("--target", type=float, default=100.0, help="fill out to this angle off-axis")
     p.add_argument("--max-new", type=float, default=0.45)
@@ -106,6 +107,8 @@ def parse(argv=None):
                         "Apple Depth Pro, or Depth Anything V3")
     p.add_argument("--stereo-args", default="", help="more stereo360 arguments, passed as they are")
     p.add_argument("--stereo-python", default="/workspace/venvs/stereo360/bin/python")
+    p.add_argument("--est-python", default="/workspace/venvs/est/bin/python",
+                   help="the venv with MoGe-2, for --long-side moge")
     p.add_argument("--stereo-dir", default="/workspace/stereo360")
     p.add_argument("--pano-only", action="store_true", help="stop before stereo")
     return p.parse_args(argv)
@@ -165,6 +168,9 @@ def main(argv=None) -> int:
     elif a.long_side == "shot":
         seg = segment(src) if segment else None
         long_side, why = placement.by_shot(w, h, seg, widen._cut_edges(seg) if seg is not None else [])
+    elif a.long_side == "moge":
+        est = stereo.estimate_moge(Path(a.src), python=a.est_python, work=work)
+        long_side, why = placement.by_moge(w, h, est)
     elif a.long_side == "camera":
         seg = segment(src) if segment else None
         est = stereo.estimate_camera(Path(a.src), python=a.stereo_python, checkout=a.stereo_dir,

@@ -24,6 +24,9 @@ def _deg(rad: float) -> float:
 
 def main(argv=None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
+    only = None
+    if argv and argv[0] == "--only":
+        only, argv = argv[1], argv[2:]
     out_path, images = argv[0], argv[1:]
     import numpy as np
     import torch
@@ -32,6 +35,8 @@ def main(argv=None) -> int:
     res = {p: {} for p in images}
 
     try:
+        if only == "geocalib":
+            raise ImportError("skipped (--only geocalib)")
         from moge.model.v2 import MoGeModel
         moge = MoGeModel.from_pretrained("Ruicheng/moge-2-vitl").to(dev).eval()
         for p in images:
@@ -55,6 +60,8 @@ def main(argv=None) -> int:
             res[p]["moge"] = {"error": traceback.format_exc()[-400:]}
 
     try:
+        if only == "moge":
+            raise ImportError("skipped (--only moge)")
         from geocalib import GeoCalib
         gc = GeoCalib().to(dev)
         for p in images:
