@@ -236,3 +236,21 @@ def test_noob_sends_its_own_black_control_and_a_reference(monkeypatch):
     units = sent["alwayson_scripts"]["ControlNet"]["args"]
     assert units[0]["module"] == "None" and "image" in units[0]
     assert units[1]["module"] == forge.IPA_MODULE and units[1]["weight"] == 0.5
+
+
+def test_plain_fill_has_no_rims_patches_or_streaks():
+    # A grey source with a gentle vertical gradient and a dark mark at its bottom
+    # edge (a shoe's shadow): the one-pass fill must stay smooth everywhere.
+    h, w = 600, 400
+    src = np.zeros((h, w, 3), np.uint8)
+    src[:] = np.linspace(150, 170, h)[:, None, None].astype(np.uint8)
+    src[-20:, 180:220] = 40
+    r = widen.widen(src, ["simple background", "grey background"],
+                    lambda *a, **k: pytest.fail("diffusion was called"),
+                    widen.Options(width=1024, view_px=256, seam_px=8), None, say=lambda s: None)
+    placed, mask, _f = sphere.place(src, 1024, 60.0)
+    fill = (sphere.off_axis_deg(1024) <= 85) & (cv2.dilate(mask, np.ones((7, 7), np.uint8)) == 0)
+    g = r.pano.astype(np.int16)
+    jump = np.maximum(np.abs(np.diff(g, axis=0))[:, :-1].max(-1), np.abs(np.diff(g, axis=1))[:-1].max(-1))
+    assert np.percentile(jump[fill[:-1, :-1]], 99.9) <= 3
+    assert r.log["plain_filled"] > 0.2

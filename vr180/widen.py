@@ -86,15 +86,70 @@ def _seed(view: np.ndarray, unknown: np.ndarray) -> np.ndarray:
     the sampler, so it is done at a quarter of the size and only the hole takes it."""
     S = view.shape[0]
     q = max(64, S // 4)
-    small = cv2.resize(view, (q, q), interpolation=cv2.INTER_AREA)
-    hole = cv2.resize(unknown.astype(np.uint8), (q, q), interpolation=cv2.INTER_NEAREST)
-    hole = cv2.dilate(hole, np.ones((3, 3), np.uint8))
+    small, hole = _shrink_known(view, ~unknown, (q, q))
     filled = cv2.inpaint(small, hole * 255, 5, cv2.INPAINT_NS)
     blurred = cv2.GaussianBlur(filled, (0, 0), max(1.0, q / 64))
     filled[hole > 0] = blurred[hole > 0]
     big = cv2.resize(filled, (S, S), interpolation=cv2.INTER_CUBIC)
     out = view.copy()
     out[unknown] = big[unknown]
+    return out
+
+
+def _shrink_known(img: np.ndarray, known: np.ndarray, size: tuple):
+    """``img`` shrunk to ``size`` averaging only its known pixels (normalised
+    convolution), and the small hole: where nothing known fell. A plain
+    INTER_AREA shrink averages the empty (black) pixels into the known ones at the
+    boundary, which pasted a dark dotted rim along every view's edge (V.1)."""
+    k = known.astype(np.float32)
+    num = cv2.resize(img.astype(np.float32) * k[..., None], size, interpolation=cv2.INTER_AREA)
+    den = cv2.resize(k, size, interpolation=cv2.INTER_AREA)
+    small = np.where(den[..., None] > 1e-3, num / np.maximum(den, 1e-3)[..., None], 0)
+    hole = (den < 0.999).astype(np.uint8)
+    return np.clip(small, 0, 255).astype(np.uint8), hole
+
+
+def _push_pull(img: np.ndarray, weight: np.ndarray) -> np.ndarray:
+    """Fill where ``weight`` is 0 by push-pull interpolation: average what is known
+    into ever smaller images (normalised), then blend back up, so every gap takes
+    a smooth mix of what surrounds it. No direction is preferred, so unlike
+    Navier-Stokes it draws no streaks out of small tone changes along an edge."""
+    img = img.astype(np.float32)
+    w = weight.astype(np.float32)
+    if w.min() > 0.999:
+        return img
+    if min(w.shape) <= 2:
+        # The coarsest level: whatever still has nothing takes the known average.
+        mean = (img * w[..., None]).sum((0, 1)) / max(float(w.sum()), 1e-4)
+        return img * w[..., None] + mean * (1 - w[..., None])
+    h2, w2 = (w.shape[0] + 1) // 2, (w.shape[1] + 1) // 2
+    num = cv2.resize(img * w[..., None], (w2, h2), interpolation=cv2.INTER_AREA)
+    den = cv2.resize(w, (w2, h2), interpolation=cv2.INTER_AREA)
+    coarse = np.where(den[..., None] > 1e-4, num / np.maximum(den, 1e-4)[..., None], 0)
+    coarse = _push_pull(coarse, np.clip(den * 4, 0, 1))
+    up = cv2.resize(coarse, (w.shape[1], w.shape[0]), interpolation=cv2.INTER_LINEAR)
+    return img * w[..., None] + up * (1 - w[..., None])
+
+
+def fill_smooth(pano: np.ndarray, known: np.ndarray, todo: np.ndarray, width: int = 1024,
+                sigma: float = 2.0) -> np.ndarray:
+    """Fill ``todo`` in one pass over the whole sphere, by push-pull from what is
+    known, at low resolution, and paste it only into ``todo``. For a plain
+    background: view-by-view fills disagreed slightly and met in soft steps, and
+    Navier-Stokes drew streaks out of the source's edge (V.1)."""
+    H, W = known.shape
+    w, h = width, width // 2
+    small, hole = _shrink_known(pano, known, (w, h))
+    pad = w // 8                      # wrap horizontally: the fill meets itself behind
+    wide = np.concatenate([small[:, -pad:], small, small[:, :pad]], 1)
+    hwide = np.concatenate([hole[:, -pad:], hole, hole[:, :pad]], 1)
+    filled = _push_pull(wide, 1.0 - hwide.astype(np.float32))
+    blurred = cv2.GaussianBlur(filled, (0, 0), sigma)
+    filled[hwide > 0] = blurred[hwide > 0]
+    filled = np.clip(filled, 0, 255).astype(np.uint8)
+    big = cv2.resize(filled[:, pad:pad + w], (W, H), interpolation=cv2.INTER_CUBIC)
+    out = pano.copy()
+    out[todo] = big[todo]
     return out
 
 
@@ -129,6 +184,7 @@ def widen(src: np.ndarray, fill_tags: list[str], inpaint: Inpainter, opt: Option
     # The subject, on the sphere: from the source, then from every view that
     # continued it, so the next view down still knows the legs belong to it.
     subj = np.zeros(source.shape, bool)
+    deferred = np.zeros(source.shape, bool)   # plain background, filled after the loop
     if segment is not None and opt.subject_tags:
         seg = segment(src)
         placed, _m, _f = sphere.place((seg * 255).astype(np.uint8), opt.width, opt.long_side)
@@ -167,8 +223,20 @@ def widen(src: np.ndarray, fill_tags: list[str], inpaint: Inpainter, opt: Option
                 else "plain" if where == "plain" and opt.plain_fill else "scene")
         t0 = time.time()
         if kind == "plain":
-            prompt, negative = "", ""
-            gen = seeded                     # the edge colour, extended; no diffusion
+            # Deferred: the whole plain background is filled in one pass after the
+            # loop (``fill_smooth``), so no view boundary can show in it.
+            rows, cols = region = sphere.bounds(v.yaw, v.pitch, F, opt.width)
+            _img, cover = sphere.back_project(np.zeros((8, 8), np.uint8), v.yaw, v.pitch, F,
+                                              opt.width, region=region)
+            newly = cover & ~known[rows][:, cols]
+            deferred[rows, cols] |= newly
+            known[rows, cols] |= cover
+            log["views"].append({"yaw": v.yaw, "pitch": v.pitch, "new": round(v.new, 3),
+                                 "kind": kind, "seconds": 0.0, "prompt": "", "negative": "",
+                                 "target_left": round(planner.remaining(planner.small(known)), 4)})
+            say("view %2d yaw %4.0f pitch %4.0f plain  : deferred to the one-pass fill"
+                % (n, v.yaw, v.pitch))
+            continue
         else:
             if kind == "subject":
                 prompt = prompts.subject_prompt(list(opt.subject_tags), fill_tags, where,
@@ -210,6 +278,10 @@ def widen(src: np.ndarray, fill_tags: list[str], inpaint: Inpainter, opt: Option
         if work:
             Image.fromarray(gen).save(work / "views" / ("%02d_y%d_p%d.png" % (n, v.yaw, v.pitch)))
 
+    if deferred.any():
+        painted = known & ~deferred
+        pano = fill_smooth(pano, painted, deferred)
+        log["plain_filled"] = round(float(deferred.mean()), 4)
     front = sphere.off_axis_deg(opt.width) <= 90
     cracks = front & ~known
     log["cracks_filled"] = round(float(cracks.mean() / front.mean()), 5)
