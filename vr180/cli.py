@@ -398,7 +398,8 @@ def main(argv=None) -> int:
         # in the same pass as the room (round 8: two separately made floors met at
         # the grown picture's edge).
         gx, gy, gw, gh = grown_g.rect
-        keep = cv2.dilate(grown_g.body.astype(np.uint8), np.ones((11, 11), np.uint8)) > 0
+        her = grown_g.body | (grown_g.fans if grown_g.fans is not None else False)
+        keep = cv2.dilate(her.astype(np.uint8), np.ones((11, 11), np.uint8)) > 0
         keep[gy:gy + gh, gx:gx + gw] = True
         pano0, m0, _f = place(picture)
         kp, _km, _kf = place((keep * 255).astype(np.uint8))

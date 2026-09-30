@@ -41,6 +41,9 @@ class Grown:
     centre: tuple[float, float]          # the source's optical centre in the canvas
     log: dict = field(default_factory=dict)
     body: np.ndarray | None = None       # the body we started with, in the canvas
+    #: Everywhere a step painted with her tags, in the canvas (round 9: the
+    #: segmenter's outline missed a hand and feet the extension had painted).
+    fans: np.ndarray | None = None
 
     def source_mask(self) -> np.ndarray:
         m = np.zeros(self.image.shape[:2], np.uint8)
@@ -242,6 +245,7 @@ def extend_side(src: np.ndarray, cut: list[str], grow: float, long_side: float, 
     active = [s for s in SIDES if s in limit]
     canvas = src.copy()
     body = segment(src)
+    fans = np.zeros(src.shape[:2], bool)
     her = prompts.subject_prompt(list(subject_tags), list(fill_tags), where, 0.0, quality)
     #: A band below the picture is floor or ground, one above it ceiling or sky
     #: (round 2c: the band under Fubuki's sofa became a stack of new rooms).
@@ -281,6 +285,9 @@ def extend_side(src: np.ndarray, cut: list[str], grow: float, long_side: float, 
             known[dy:dy + oh, dx:dx + ow] = True
             prev = np.zeros((H, W), bool)
             prev[dy:dy + oh, dx:dx + ow] = old_body
+            grown_fans = np.zeros((H, W), bool)
+            grown_fans[dy:dy + oh, dx:dx + ow] = fans
+            fans = grown_fans
             band = ~known
             # A fan from where the body crosses the old edge, across the band.
             edge = np.zeros((H, W), np.uint8)
@@ -289,6 +296,7 @@ def extend_side(src: np.ndarray, cut: list[str], grow: float, long_side: float, 
             zone = (_fan(edge, d, inc, max(8, span // 8), math.tan(math.radians(12)))
                     if span else np.zeros((H, W), bool)) & band
             rest = band & ~zone
+            fans |= zone
             # The whole canvas, scaled to the budget: the model must see her --
             # face and all -- or it paints a new person where it continues her body
             # (dev5 on the pod: strip windows without her head gave Fubuki on the bed
@@ -366,4 +374,5 @@ def extend_side(src: np.ndarray, cut: list[str], grow: float, long_side: float, 
                "refine_denoise": refine_denoise, "rim": rim,
                "order": "body-first" if scene_of is None else "scene-first", "prompt": her})
     g.body = body
+    g.fans = fans
     return g

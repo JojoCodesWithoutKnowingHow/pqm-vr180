@@ -406,3 +406,12 @@ def test_cli_runs_round_nine(tmp_path, monkeypatch, variant):
     else:
         assert log["extend_side"]["order"] == "scene-first"
     assert {v["kind"] for v in log["widen"]["views"]} <= {"scene"}
+
+
+def test_extension_records_where_it_painted_her():
+    src = checker(416, 608)
+    g = grow.extend_side(src, ["bottom"], 0.6, 60.0, ColourForge(), ("1girl",), ["room"], None,
+                         seed=1, refine_denoise=0, step=0.3, segment=her_segment(src))
+    x0, y0, w, h = g.rect
+    assert g.fans is not None and g.fans.shape == g.image.shape[:2]
+    assert g.fans[y0 + h:].any() and not g.fans[y0:y0 + h, x0:x0 + w].any()
