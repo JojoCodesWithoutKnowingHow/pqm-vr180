@@ -96,27 +96,31 @@ def _gen_size(h: int, w: int, budget: int) -> tuple[int, int]:
     return (max(64, int(round(w * scale / 64)) * 64), max(64, int(round(h * scale / 64)) * 64))
 
 
-def _paste(canvas: np.ndarray, region, img: np.ndarray, mask: np.ndarray) -> None:
-    """``img`` (the region's size) into ``canvas`` where ``mask``, feathered a pixel
-    or two inside it so a pass leaves no hard edge of its own."""
+#: How far a repaint reaches past what it is for, and how far in its pixels take
+#: to fade from nothing to full.
+OVERLAP = 24
+
+
+def edge_ramp(mask: np.ndarray, r: int) -> np.ndarray:
+    """0 at the mask's edge, rising to 1 ``r`` px in (the image's own border is not
+    an edge). Round 14: the model inks a thin line along every inpaint mask's edge;
+    every paste gave that line about half weight, so each growth step, the
+    original's edges and each repaint left one behind. From zero at the edge, the
+    inked line gets no weight at all."""
+    d = cv2.distanceTransform(np.pad(mask.astype(np.uint8), 1, constant_values=1),
+                              cv2.DIST_L2, 5)[1:-1, 1:-1]
+    return np.clip(d / max(r, 1), 0, 1).astype(np.float32)
+
+
+def _paste(canvas: np.ndarray, region, img: np.ndarray, mask: np.ndarray,
+           r: int = OVERLAP) -> None:
+    """``img`` (the region's size) into ``canvas`` where ``mask``, weighted from 0
+    at the mask's edge to 1 ``r`` px in (``edge_ramp``); a float mask multiplies it."""
     rs, cs = region
-    m = mask.astype(np.float32)
-    m = cv2.GaussianBlur(m, (0, 0), 1.5) * (m > 0) * m
+    m = edge_ramp(mask > 0, r) * mask.astype(np.float32)
     sub = canvas[rs, cs].astype(np.float32)
     canvas[rs, cs] = (sub * (1 - m[..., None]) + img.astype(np.float32) * m[..., None]
                       ).round().astype(np.uint8)
-
-
-def _paste_across(canvas: np.ndarray, img: np.ndarray, band: np.ndarray, r: int = 24) -> None:
-    """``img`` (the canvas's size) into ``canvas`` over ``band``, cross-faded ``r``
-    px either side of the band's edge (dev6 on the pod: each step's band met the
-    last in a thin straight line the full-resolution pass could not remove)."""
-    b = band.astype(np.uint8)
-    d_in = cv2.distanceTransform(b, cv2.DIST_L2, 5)
-    d_out = cv2.distanceTransform(1 - b, cv2.DIST_L2, 5)
-    w = np.clip(0.5 + (d_in - d_out) / (2 * r), 0, 1).astype(np.float32)
-    canvas[:] = (canvas.astype(np.float32) * (1 - w[..., None])
-                 + img.astype(np.float32) * w[..., None]).round().astype(np.uint8)
 
 
 def body_zone(seg: np.ndarray, rect, shape, add: dict, spread_deg: float = 12.0) -> np.ndarray:
@@ -172,7 +176,8 @@ def refine(canvas: np.ndarray, mask: np.ndarray, inpaint, prompt: str, negative:
             out = inpaint(canvas[region].copy(), (m * 255).astype(np.uint8), prompt, negative,
                           seed + n, steps=steps, denoise=denoise, touch_up=True)
             # Fade towards the tile's edges inside the canvas, so overlapping tiles
-            # blend (round 2c: each pasted to its edge and left rectangles).
+            # blend (round 2c: each pasted to its edge and left rectangles); the
+            # mask's own edge fades in from zero (``edge_ramp``).
             ramp_y = np.ones(th, np.float32)
             ramp_x = np.ones(tw, np.float32)
             r = np.minimum(np.arange(th) + 1, fade) / fade
@@ -185,7 +190,8 @@ def refine(canvas: np.ndarray, mask: np.ndarray, inpaint, prompt: str, negative:
                 ramp_x = np.minimum(ramp_x, r)
             if x + tw < W:
                 ramp_x = np.minimum(ramp_x, r[::-1])
-            _paste(canvas, region, out, m.astype(np.float32) * ramp_y[:, None] * ramp_x[None, :])
+            weight = ((m > 0) * ramp_y[:, None] * ramp_x[None, :]).astype(np.float32)
+            _paste(canvas, region, out, weight, r=16)
             n += 1
     return n
 
@@ -307,8 +313,27 @@ def extend_side(src: np.ndarray, cut: list[str], grow: float, long_side: float, 
                 jobs.append((rest, prompts.view_prompt(list(fill_tags), where, pitch_of[side], quality),
                              prompts.view_negative(prompts.NEGATIVE, where, pitch_of[side])))
             painted = []
+            # The band starts from the blur, so a fade into it never meets black.
+            ch0, cw0 = H, W
+            gw0, gh0 = _gen_size(ch0, cw0, budget)
+            sm0 = cv2.resize(band.astype(np.uint8), (gw0, gh0), interpolation=cv2.INTER_NEAREST) > 0
+            if scene_of is None:
+                pre = cv2.resize(_prefill(cv2.resize(canvas, (gw0, gh0), interpolation=cv2.INTER_AREA),
+                                          sm0), (cw0, ch0), interpolation=cv2.INTER_CUBIC)
+                canvas[band] = pre[band]
+            grown_band = cv2.dilate(band.astype(np.uint8), np.ones((2 * OVERLAP + 1,) * 2, np.uint8)) > 0
             for k, (todo, prompt, negative) in enumerate(jobs):
-                m = todo[region]
+                if k == 0:
+                    # Her fan and OVERLAP px past it, into what is there and the rest.
+                    gen = cv2.dilate(todo.astype(np.uint8), np.ones((2 * OVERLAP + 1,) * 2,
+                                                                   np.uint8)) > 0
+                else:
+                    # The rest and OVERLAP px into the old canvas -- never into her.
+                    gen = todo | (grown_band & ~band)
+                if not todo.any():
+                    painted.append(0.0)
+                    continue
+                m = gen[region]
                 painted.append(round(float(m.mean()), 3))
                 if m.mean() < 0.002:
                     continue
@@ -336,12 +361,7 @@ def extend_side(src: np.ndarray, cut: list[str], grow: float, long_side: float, 
                 if out is None:
                     out = init                 # keep the pre-fill; the sphere views go on
                 big = cv2.resize(out, (cw, ch), interpolation=cv2.INTER_LANCZOS4)
-                if scene_of is not None:
-                    _paste_across(canvas, big, zone, r=8)   # only the body, over the scene; a tight edge
-                elif k == 0:
-                    _paste(canvas, region, big, m)      # the scene pass crosses this one
-                else:
-                    _paste_across(canvas, big, band)
+                _paste(canvas, region, big, m)
             body = track_body(segment(canvas), prev)
             reaches = body_reaches(body, side)
             passes.append({"side": side, "added": inc, "painted": painted,

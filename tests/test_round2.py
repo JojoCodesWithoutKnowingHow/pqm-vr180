@@ -435,3 +435,28 @@ def test_pose_words_drop_the_crop():
     from vr180 import prompts
     assert prompts.pose_words("lying, on side, upper body, reaching towards viewer, cowboy shot") == \
         ["lying", "on side", "reaching towards viewer"]
+
+
+class InkForge:
+    """Paints every mask a flat grey and, like the real model, inks a black line
+    along the mask's edge."""
+
+    def __call__(self, image, mask, prompt, negative, seed, **kw):
+        out = image.copy()
+        m = mask > 0
+        out[m] = 150
+        edge = m & ~(cv2.erode(m.astype(np.uint8), np.ones((3, 3), np.uint8)) > 0)
+        out[edge] = 0
+        return out
+
+
+def test_no_ink_line_survives_a_repaint():
+    # Round 14: the model inks a line along every inpaint mask's edge, and every
+    # paste gave it about half weight -- one line per growth step, along the
+    # original's edges, and at every repaint. A uniform scene must stay uniform.
+    src = np.full((608, 416, 3), 150, np.uint8)
+    for refine in (0.0, 0.35):       # the growth steps alone, then with the tiles
+        g = grow.extend_side(src, ["bottom", "left"], 0.6, 60.0, InkForge(), ("1girl",), ["room"],
+                             None, seed=1, refine_denoise=refine, step=0.3,
+                             segment=lambda rgb, threshold=0.5: np.zeros(rgb.shape[:2], bool))
+        assert g.image.min() >= 140, (refine, g.image.min())

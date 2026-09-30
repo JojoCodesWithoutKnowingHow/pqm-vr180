@@ -57,7 +57,10 @@ def repaint(pano: np.ndarray, picture: np.ndarray, inpaint, prompt: str, negativ
             continue
         gen = inpaint(view, (band * 255).astype(np.uint8), prompt, negative, seed + n,
                       steps=steps, denoise=denoise, touch_up=True)
-        w = cv2.GaussianBlur(band.astype(np.float32), (0, 0), 2.0) * band
+        # Zero at both of the band's edges (the model inks a line along a mask's
+        # edge; round 14), full in its middle.
+        from .grow import edge_ramp
+        w = edge_ramp(band, max(2, (inner + outer) // 4))
         region = sphere.bounds(yaw, pitch, fov, W)
         img, cover = sphere.back_project(gen, yaw, pitch, fov, W, region=region)
         ws, _c = sphere.back_project(w, yaw, pitch, fov, W, interp=cv2.INTER_LINEAR, region=region)
