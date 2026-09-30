@@ -689,3 +689,59 @@ def test_cli_layout_omit_leaves_tags_out_of_the_layout_only(tmp_path, monkeypatc
     log = json.loads((tmp_path / "o_180_LR.work" / "log.json").read_text(encoding="utf-8"))
     assert "breasts" not in log["layout"]["prompt"] and "skirt" in log["layout"]["prompt"]
     assert "breasts" in log["extend_in_layout"]["prompt"]
+
+
+@pytest.mark.parametrize("reaches, chose", [(False, "J"), (True, "L")])
+def test_cli_auto_pipeline_picks_l_when_her_body_runs_out_of_frame(tmp_path, monkeypatch,
+                                                                    reaches, chose):
+    # Round 23 (the author's pick): J's stepwise extension first; a step after which
+    # her body still reaches the grown edge means L, none means J (kept, no ADetailer).
+    from vr180 import cli, forge, grow, subject
+    src = checker(416, 608)
+    Image.fromarray(src).save(tmp_path / "src.png")
+    seg_model = tmp_path / "seg.onnx"
+    seg_model.write_bytes(b"x")
+    fake = ColourForge()
+
+    class FakeSeg:
+        def __init__(self, path):
+            self.fn = her_segment(src)
+
+        def __call__(self, rgb, threshold=0.5):
+            return self.fn(rgb, threshold)
+
+    real = grow.extend_side
+    calls = []
+
+    def extend_side(*args, **kw):
+        g = real(*args, **kw)
+        calls.append(g)
+        if g is not None:
+            for p_ in g.log.get("passes", []):
+                p_["body_reaches_edge"] = reaches
+        return g
+
+    monkeypatch.setattr(grow, "extend_side", extend_side)
+    monkeypatch.setattr(subject, "Segmenter", FakeSeg)
+    monkeypatch.setattr(forge.Forge, "resolve", lambda self, s: [])
+    monkeypatch.setattr(forge.Forge, "inpaint",
+                        lambda self, image, mask, prompt, negative, seed, s, **kw:
+                        fake(image, mask, prompt, negative, seed, **kw))
+    rc = cli.main([str(tmp_path / "src.png"), "-o", str(tmp_path / "o_180_LR.jpg"), "--checkpoint",
+                   "c", "--tags", "indoors, room", "--subject-tags", "1girl, skirt",
+                   "--subject-framing", "sitting", "--long-side", "60",
+                   "--width", "1024", "--view-px", "256", "--segment-model", str(seg_model),
+                   "--pano-only", "--join", "hard", "--auto-pipeline", "--extend-side", "0.6",
+                   "--extend-refine", "0.35", "--layout", "fisheye", "--layout-px", "256",
+                   "--layout-hires", "512", "--compose", "0", "--seam-repaint", "0.4",
+                   "--soften-rim", "0", "--adetail", "0.27"])
+    assert rc == 0
+    assert len(calls) == 1                                   # the extension made once
+    log = json.loads((tmp_path / "o_180_LR.work" / "log.json").read_text(encoding="utf-8"))
+    assert log["auto_pipeline"]["chose"] == chose
+    if chose == "L":
+        assert "extend_in_layout" in log and "1girl" in log["layout"]["prompt"]
+        assert log["extend_in_layout"]["adetail"] is not None
+    else:
+        assert "layout_owns_scenery" in log and "extend_side" in log
+        assert "no humans" in log["layout"]["prompt"] and "adetail" not in log

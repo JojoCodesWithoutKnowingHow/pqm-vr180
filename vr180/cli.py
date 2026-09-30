@@ -161,6 +161,13 @@ def parse(argv=None):
                    help="the source's pose and framing words (e.g. 'sitting, crossed legs, "
                         "cowboy shot'); with --extend-regional they go into her region's prompt "
                         "so it knows where her body ends (round 7)")
+    p.add_argument("--auto-pipeline", action="store_true",
+                   help="round 23 (the author's pick): grow her body stepwise first (J's "
+                        "extension); if her body still reaches a grown edge after any step, "
+                        "her limbs run out of frame -- use L (--extend-in-layout "
+                        "--layout-full-prompt, with --adetail); if not, she is barely cut -- "
+                        "keep the extension and use J (--layout-owns-scenery, no ADetailer). "
+                        "r18-22: L drew a giant second Yamato whatever was tried; J did not")
     p.add_argument("--layout-omit", default="", metavar="TAGS",
                    help="round 22, with --layout-full-prompt: subject tags left out of the "
                         "layout's prompt only (ADetailer keeps them), e.g. 'breasts, nipples' "
@@ -337,6 +344,28 @@ def main(argv=None) -> int:
         placed_, pm_ = sphere.place_focal(g.source_mask(), W, g.focal, *g.centre)
         return ((placed_ > 127) & (pm_ > 0)).astype(np.uint8) * 255
 
+    pre_g = None
+    if a.auto_pipeline and seg_src is not None and a.layout == "fisheye" and cut:
+        ext_tags = list(dict.fromkeys(list(subject_tags) + prompts.pose_words(a.subject_framing)))
+        pre_g = grow.extend_side(src, cut, a.extend_side or 1.0, long_side, inpaint, ext_tags,
+                                 tags, where, a.seed + 5000, quality=a.quality, reference=ref,
+                                 steps=a.steps, max_deg=a.extend_max_deg,
+                                 refine_denoise=a.extend_refine, step=a.extend_step,
+                                 segment=segment)
+        runs_out = pre_g is not None and any(p_.get("body_reaches_edge")
+                                             for p_ in pre_g.log.get("passes", []))
+        extra_log["auto_pipeline"] = {"chose": "L" if runs_out else "J",
+                                      "reaching_steps": sum(bool(p_.get("body_reaches_edge"))
+                                                            for p_ in (pre_g.log.get("passes", [])
+                                                                       if pre_g else []))}
+        print("auto pipeline: %s" % extra_log["auto_pipeline"])
+        if runs_out:
+            a.extend_in_layout, a.layout_full_prompt, a.layout_owns_scenery = True, True, False
+            pre_g = None
+        else:
+            a.extend_in_layout, a.layout_full_prompt, a.layout_owns_scenery = False, False, True
+            a.adetail = 0.0
+            a.extend_side = a.extend_side or 1.0
     if a.extend_in_layout and seg_src is not None and a.layout == "fisheye":
         pano0, m0, _f = centred(src)
         region = None
@@ -399,11 +428,11 @@ def main(argv=None) -> int:
             def scene_of(cw, ch, cx, cy, lay=lay, f0=f0):
                 return sphere.flat_of(lay, cw, ch, f0, cx, cy)
         ext_tags = list(dict.fromkeys(list(subject_tags) + prompts.pose_words(a.subject_framing)))
-        g = grow.extend_side(src, cut, a.extend_side, long_side, inpaint, ext_tags, tags,
-                             where, a.seed + 5000, quality=a.quality, reference=ref,
-                             steps=a.steps, max_deg=a.extend_max_deg,
-                             refine_denoise=a.extend_refine, step=a.extend_step,
-                             segment=segment, scene_of=scene_of)
+        g = pre_g if pre_g is not None else grow.extend_side(
+            src, cut, a.extend_side, long_side, inpaint, ext_tags, tags, where, a.seed + 5000,
+            quality=a.quality, reference=ref, steps=a.steps, max_deg=a.extend_max_deg,
+            refine_denoise=a.extend_refine, step=a.extend_step, segment=segment,
+            scene_of=scene_of)
         if g is not None:
             picture = g.image
             grown_g = g
