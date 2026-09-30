@@ -126,7 +126,8 @@ class Forge:
     def inpaint(self, image: np.ndarray, mask: np.ndarray, prompt: str, negative: str,
                 seed: int, s: Settings, control: np.ndarray | None = None,
                 reference: np.ndarray | None = None, steps: int | None = None,
-                denoise: float | None = None, touch_up: bool = False) -> np.ndarray:
+                denoise: float | None = None, touch_up: bool = False,
+                regions: list | None = None) -> np.ndarray:
         """``mask`` is uint8, 255 where to paint. ``control`` is the inpaint
         ControlNet's image (``noob``: the view with the hole pure black);
         ``reference`` the IP-Adapter's. ``denoise`` overrides the settings' for
@@ -134,7 +135,12 @@ class Forge:
         extension's full-resolution pass, the seam repaint) is a low-denoise pass
         over pixels already there, so it sends no inpaint ControlNet: that one
         exists to fill a black hole. Returns an image the size of ``image``.
-        Raises ``ForgeError`` when the fill comes back black (NaN latents)."""
+        Raises ``ForgeError`` when the fill comes back black (NaN latents).
+
+        ``regions`` (round 7): ``[(prompt, mask), ...]`` masks covering the image
+        between them, each prompt steering only its mask, by Forge Couple's Mask
+        mode (Haoming02/sd-forge-couple, which must be installed in Forge).
+        ``prompt`` is then ignored; negatives cannot be regional."""
         h, w = image.shape[:2]
         payload = {
             "init_images": [b64png(image)], "mask": b64png(mask),
@@ -171,8 +177,18 @@ class Forge:
                           "image": b64png(reference), "weight": s.ipa_weight,
                           "guidance_start": s.ipa_range[0], "guidance_end": s.ipa_range[1],
                           "control_mode": "Balanced", "resize_mode": "Just Resize"})
+        scripts = {}
         if units:
-            payload["alwayson_scripts"] = {"ControlNet": {"args": units}}
+            scripts["ControlNet"] = {"args": units}
+        if regions:
+            payload["prompt"] = "\n".join(p.replace("\n", " ") for p, _m in regions)
+            mapping = [{"mask": b64png(((m > 0) * 255).astype(np.uint8)), "weight": 1.0}
+                       for _p, m in regions]
+            scripts["forge couple"] = {"args": [True, True, "Mask", "\n", None, "None", 1.0,
+                                                mapping, "off", False, False,
+                                                None, None, None, None, None, None]}
+        if scripts:
+            payload["alwayson_scripts"] = scripts
         r = self._call("POST", "/sdapi/v1/img2img", payload)
         out = unpng(r["images"][0])
         if out.shape[:2] != (h, w):

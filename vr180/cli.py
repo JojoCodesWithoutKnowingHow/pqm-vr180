@@ -151,6 +151,11 @@ def parse(argv=None):
                         "then inpaint the body's continuation inside the layout's fisheye -- the "
                         "fan where the frame cuts her the only mask, the room in view -- and "
                         "refine it at full resolution (--extend-refine). Needs --layout fisheye")
+    p.add_argument("--extend-regional", action="store_true",
+                   help="round 7 (the author's idea), with --extend-in-layout: generate the "
+                        "layout with two regional prompts (Forge Couple) -- her tags over her "
+                        "body and its continuation, the scene with no people elsewhere -- "
+                        "instead of inpainting her into a finished layout")
     p.add_argument("--extend-step", type=float, default=0.3,
                    help="grow a cut side this fraction of the source's size at a time, and stop "
                         "once the body no longer reaches the new edge (round 2: growing it all at "
@@ -213,9 +218,10 @@ def main(argv=None) -> int:
         return 2
 
     def inpaint(image, mask, prompt, negative, seed, control=None, reference=None, steps=None,
-                denoise=None, touch_up=False):
+                denoise=None, touch_up=False, regions=None):
         return f.inpaint(image, mask, prompt, negative, seed, s, control=control,
-                         reference=reference, steps=steps, denoise=denoise, touch_up=touch_up)
+                         reference=reference, steps=steps, denoise=denoise, touch_up=touch_up,
+                         regions=regions)
 
     opt = widen.Options(width=a.width, target_deg=a.target,
                         max_new=a.max_new, seed=a.seed, quality=a.quality,
@@ -286,13 +292,23 @@ def main(argv=None) -> int:
 
     if a.extend_in_layout and seg_src is not None and a.layout == "fisheye":
         pano0, m0, _f = centred(src)
+        region = None
+        if a.extend_regional:
+            her_f = inlayout.her_on_fisheye(src, seg_src, cut, long_side, W, a.layout_px,
+                                            a.layout_deg, a.extend_side or 1.0,
+                                            a.extend_max_deg)
+            if her_f is not None:
+                her_p = prompts.subject_prompt(list(subject_tags), tags, where, 0.0, a.quality)
+                region = (her_p, her_f)
         lay, extra_log["layout"], fish = layout.make_layout(
-            pano0, m0 > 0, tags, where, inpaint, a.seed + 7000, return_fisheye=True, **lay_kw)
+            pano0, m0 > 0, tags, where, inpaint, a.seed + 7000, return_fisheye=True,
+            region=region, **lay_kw)
         res = inlayout.extend(src, seg_src, cut, long_side, W, fish, a.layout_deg, inpaint,
                               subject_tags, tags, where, a.seed + 5000, quality=a.quality,
                               reference=ref, steps=a.steps, grow_frac=a.extend_side or 1.0,
                               max_side_deg=a.extend_max_deg,
-                              refine_denoise=a.extend_refine or 0.5, work=work)
+                              refine_denoise=a.extend_refine or 0.5, work=work,
+                              paint=region is None)
         if res is not None:
             g, fish, extra_log["extend_in_layout"] = res
             img_, cover_ = layout.from_fisheye(fish, W, a.layout_deg)

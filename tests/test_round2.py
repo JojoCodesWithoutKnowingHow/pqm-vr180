@@ -3,6 +3,7 @@ placement), the full-resolution pass, scene-first, and the seam repaint. Offline
 import json
 import math
 
+import cv2
 import numpy as np
 import pytest
 from PIL import Image
@@ -305,3 +306,51 @@ def test_cli_runs_extend_in_layout(tmp_path, monkeypatch):
     assert (work / "layout_fisheye_with_body.png").exists()
     assert {v["kind"] for v in log["widen"]["views"]} <= {"scene"}
     assert "repaint_inner" in log["seam"]
+
+
+def test_forge_sends_regions_to_forge_couple(monkeypatch):
+    from vr180 import forge
+    f = forge.Forge("http://x")
+    sent = {}
+
+    def fake_call(method, path, payload=None, tries=3):
+        sent.update(payload)
+        return {"images": [forge.b64png(np.full((32, 32, 3), 90, np.uint8))]}
+
+    monkeypatch.setattr(f, "_call", fake_call)
+    her = np.zeros((32, 32), bool)
+    her[16:] = True
+    img = np.full((32, 32, 3), 128, np.uint8)
+    f.inpaint(img, np.full((32, 32), 255, np.uint8), "ignored", "n", 1,
+              forge.Settings(checkpoint="c"), regions=[("scene, no humans", ~her), ("1girl", her)])
+    args = sent["alwayson_scripts"]["forge couple"]["args"]
+    assert len(args) == 17 and args[:4] == [True, True, "Mask", "\n"] and args[5] == "None"
+    assert len(args[7]) == 2 and all(set(m) == {"mask", "weight"} for m in args[7])
+    assert sent["prompt"] == "scene, no humans\n1girl"
+
+
+def test_regional_layout_paints_her_only_in_her_region_and_hires_leaves_it():
+    # Round 7: the layout generated once with two regional prompts; the hires pass
+    # (scene, no people) never touches her region.
+    from vr180 import inlayout, layout
+    src = checker(416, 608)
+    seg = np.zeros(src.shape[:2], bool)
+    seg[304:, 166:250] = True
+    her = inlayout.her_on_fisheye(src, seg, ["bottom"], 60.0, 1024, 256, 100.0, grow_frac=0.6)
+    assert her is not None and 0.005 < her.mean() < 0.4
+    pano, mask, _f = sphere.place(src, 1024, 60.0)
+    fake = ColourForge()
+    _lay, _log, fish = layout.make_layout(pano, mask > 0, ["room"], None, fake, seed=1, S=256,
+                                          hires=512, return_fisheye=True,
+                                          region=("1girl, skirt", her))
+    first = fake.calls[0]
+    assert first["regions"] is not None and len(first["regions"]) == 2
+    assert all(c["regions"] is None and not c["her"] for c in fake.calls[1:])  # the hires tiles
+    big_her = cv2.resize(her.astype(np.uint8), (512, 512), interpolation=cv2.INTER_NEAREST) > 0
+    green = (fish[..., 1] > 200) & (fish[..., 0] < 40) & (fish[..., 2] < 40)
+    inner = cv2.erode(big_her.astype(np.uint8), np.ones((25, 25), np.uint8)) > 0
+    assert green[inner].mean() > 0.5                 # her region kept its green body
+    g, _fish2, log = inlayout.extend(src, seg, ["bottom"], 60.0, 1024, fish, 100.0,
+                                     ColourForge(), ("1girl",), ["room"], None, seed=1,
+                                     grow_frac=0.6, paint=False)
+    assert log["order"] == "regional"

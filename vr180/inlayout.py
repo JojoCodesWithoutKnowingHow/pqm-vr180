@@ -28,14 +28,36 @@ import numpy as np
 from . import grow, layout, prompts, sphere
 
 
+def her_on_fisheye(src: np.ndarray, seg: np.ndarray, cut: list[str], long_side: float, W: int,
+                   S: int, max_deg: float, grow_frac: float = 1.0,
+                   max_side_deg: float = 70.0) -> np.ndarray | None:
+    """Round 7: her body and its continuation (the fan) on an S px fisheye, for a
+    regional prompt; None when nothing is cut."""
+    h, w = src.shape[:2]
+    f = grow.focal(w, h, long_side)
+    add = grow.side_growth(w, h, cut, grow_frac, f, max_side_deg)
+    if not add:
+        return None
+    Wc, Hc, x0, y0 = grow.canvas_geometry(w, h, add)
+    cx, cy = x0 + w / 2, y0 + h / 2
+    zone = grow.body_zone(seg, (x0, y0, w, h), (Hc, Wc), add)
+    body = np.zeros((Hc, Wc), bool)
+    body[y0:y0 + h, x0:x0 + w] = seg
+    her = cv2.dilate((zone | body).astype(np.uint8), np.ones((15, 15), np.uint8)) * 255
+    hp, _m = sphere.place_focal(her, W, f, cx, cy)
+    return layout.to_fisheye(hp, S, max_deg, cv2.INTER_NEAREST) > 127
+
+
 def extend(src: np.ndarray, seg: np.ndarray, cut: list[str], long_side: float, W: int,
            fish: np.ndarray, max_deg: float, inpaint, subject_tags, fill_tags,
            where: str | None, seed: int, quality: str = prompts.QUALITY,
            reference: np.ndarray | None = None, steps: int | None = None,
            grow_frac: float = 1.0, max_side_deg: float = 70.0, budget: int = 1280 * 1024,
-           refine_denoise: float = 0.5, work=None):
+           refine_denoise: float = 0.5, work=None, paint: bool = True):
     """(grown picture as ``grow.Grown``, updated fisheye, log), or None when nothing
-    is cut. ``fish`` is the layout's (hires) fisheye, ``max_deg`` its reach."""
+    is cut. ``fish`` is the layout's (hires) fisheye, ``max_deg`` its reach.
+    ``paint=False`` (round 7): the layout was generated with her region already, so
+    her body is in it; only the flat full-resolution refine is done."""
     h, w = src.shape[:2]
     f = grow.focal(w, h, long_side)
     add = grow.side_growth(w, h, cut, grow_frac, f, max_side_deg)
@@ -54,6 +76,12 @@ def extend(src: np.ndarray, seg: np.ndarray, cut: list[str], long_side: float, W
     rect[y0:y0 + h, x0:x0 + w] = 255
     sp, _m = sphere.place_focal(rect, W, f, cx, cy)
     sf = layout.to_fisheye(sp, S, max_deg, cv2.INTER_NEAREST) > 127
+    if not paint:
+        fish = fish.copy()
+        top = left = side = g = 0
+        her = prompts.subject_prompt(list(subject_tags), list(fill_tags), where, 0.0, quality)
+        return _flat(src, fish, W, max_deg, f, Wc, Hc, x0, y0, cx, cy, zone, inpaint, her, seed,
+                     steps, refine_denoise, work, cut, add, (top, left, side), g, "regional")
     ys, xs = np.nonzero(zf | sf)
     # A crop holding her and the fan, with a third again of room around them.
     y_a, y_b, x_a, x_b = ys.min(), ys.max() + 1, xs.min(), xs.max() + 1
@@ -77,6 +105,15 @@ def extend(src: np.ndarray, seg: np.ndarray, cut: list[str], long_side: float, W
     fish = fish.copy()
     big = cv2.resize(out, (side, side), interpolation=cv2.INTER_LANCZOS4)
     grow._paste(fish, region, big, m)
+    return _flat(src, fish, W, max_deg, f, Wc, Hc, x0, y0, cx, cy, zone, inpaint, her, seed,
+                 steps, refine_denoise, work, cut, add, (top, left, side), g, "in-layout")
+
+
+def _flat(src, fish, W, max_deg, f, Wc, Hc, x0, y0, cx, cy, zone, inpaint, her, seed, steps,
+          refine_denoise, work, cut, add, crop, g, order):
+    """The grown flat canvas out of the (updated) fisheye; the fan refined there at
+    the source's resolution."""
+    h, w = src.shape[:2]
     # Back to a flat canvas at the source's density; the fan refined there.
     lay_eq, cover = layout.from_fisheye(fish, W, max_deg)
     canvas = sphere.flat_of(lay_eq, Wc, Hc, f, cx, cy)
@@ -90,8 +127,8 @@ def extend(src: np.ndarray, seg: np.ndarray, cut: list[str], long_side: float, W
         from PIL import Image
         Image.fromarray(fish).save(work / "layout_fisheye_with_body.png")
     g_out = grow.Grown(canvas, (x0, y0, w, h), f, (cx, cy),
-                       {"cut": cut, "added": add, "canvas": [Wc, Hc], "order": "in-layout",
-                        "fisheye_crop": [top, left, side], "generated_at": g,
+                       {"cut": cut, "added": add, "canvas": [Wc, Hc], "order": order,
+                        "fisheye_crop": list(crop), "generated_at": g,
                         "refine_tiles": tiles, "refine_denoise": refine_denoise,
                         "prompt": her})
     g_out.body = None

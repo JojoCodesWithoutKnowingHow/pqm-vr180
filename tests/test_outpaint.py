@@ -22,14 +22,21 @@ class ColourForge:
         self.calls = []
 
     def __call__(self, image, mask, prompt, negative, seed, control=None, reference=None,
-                 steps=None, denoise=None, touch_up=False):
+                 steps=None, denoise=None, touch_up=False, regions=None):
         her = "no humans" not in prompt
         green_in = (image[..., 1] > 200) & (image[..., 0] < 40) & (image[..., 2] < 40)
         self.calls.append({"her": her, "prompt": prompt, "denoise": denoise, "touch_up": touch_up,
                            "control": control is not None,
                            "repaints_body": bool((green_in & (mask > 0)).any()),
-                           "masked": float((mask > 0).mean()), "shape": image.shape[:2]})
+                           "masked": float((mask > 0).mean()), "shape": image.shape[:2],
+                           "regions": regions})
         out = image.copy()
+        if regions:
+            # Regional prompts: each region painted by its own prompt.
+            for rprompt, rmask in regions:
+                sel = (mask > 0) & (rmask > 0)
+                out[sel] = (0, 0, 255) if "no humans" in rprompt else (0, 255, 0)
+            return out
         out[mask > 0] = (0, 255, 0) if her else (0, 0, 255)
         return out
 

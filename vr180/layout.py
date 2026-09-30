@@ -78,7 +78,8 @@ def make_layout(pano: np.ndarray, known: np.ndarray, fill_tags: list[str], where
                 quality: str = prompts.QUALITY, negative: str = prompts.NEGATIVE,
                 reference: np.ndarray | None = None, steps: int | None = None,
                 work=None, strong: bool = False, hires: int = 0,
-                hires_denoise: float = 0.4, return_fisheye: bool = False):
+                hires_denoise: float = 0.4, return_fisheye: bool = False,
+                region: tuple | None = None):
     """(layout equirect the size of ``pano``, log). Outside the fisheye's disc the
     layout is the disc's edge carried outward and blurred, so a view there still
     starts from something of the scene's colour.
@@ -88,7 +89,14 @@ def make_layout(pano: np.ndarray, known: np.ndarray, fill_tags: list[str], where
     txt2img hires fix, on the fisheye -- so the scene reaches the panorama's own
     density (round 3: a 1024 px layout over 200 degrees left G's floors in flat
     blocks). One picture refined in overlapping tiles agrees with itself; the
-    views that used to redraw it can then do little or nothing."""
+    views that used to redraw it can then do little or nothing.
+
+    ``region`` (round 7, the author's idea): ``(her_prompt, her_mask)``, her mask a
+    bool array the fisheye's size (``S``). The layout is then generated with two
+    regional prompts -- her tags over her body and its continuation, the scene with
+    no people everywhere else -- so the room and her legs are designed together
+    (round 6 painted her into a finished room: pillows for legs, a sofa with
+    nipples). The hires pass does not touch her region."""
     from . import widen   # the pre-fill and the back fill live there
     H, W = known.shape
     fish = to_fisheye(pano, S, max_deg)
@@ -99,15 +107,22 @@ def make_layout(pano: np.ndarray, known: np.ndarray, fill_tags: list[str], where
     control = seeded.copy()
     control[mask > 0] = 0
     prompt = layout_prompt(fill_tags, where, quality, strong=strong)
+    extra = {}
+    if region is not None:
+        her_prompt, her = region
+        extra["regions"] = [(prompt, ~her), (her_prompt, her)]
+        negative = prompts.BASE_NEGATIVE          # no "no people" negative over her
     gen = inpaint(seeded, mask, prompt, negative, seed, control=control, reference=reference,
-                  steps=steps)
+                  steps=steps, **extra)
     tiles = 0
     if hires and hires > S:
         from .grow import refine
         big = cv2.resize(gen, (hires, hires), interpolation=cv2.INTER_LANCZOS4)
-        bmask = cv2.resize(unknown.astype(np.uint8), (hires, hires),
+        keep = unknown if region is None else unknown & ~(cv2.dilate(
+            region[1].astype(np.uint8), np.ones((9, 9), np.uint8)) > 0)
+        bmask = cv2.resize(keep.astype(np.uint8), (hires, hires),
                            interpolation=cv2.INTER_NEAREST) > 0
-        tiles = refine(big, bmask, inpaint, prompt, negative, seed + 1, hires_denoise,
+        tiles = refine(big, bmask, inpaint, prompt, prompts.NEGATIVE, seed + 1, hires_denoise,
                        steps=steps)
         gen = big
     img, cover = from_fisheye(gen, W, max_deg)
