@@ -241,6 +241,7 @@ def main(argv=None) -> int:
         return sphere.place(img, W, long_side)
 
     picture, place, orig_mask, lay = src, centred, None, None
+    seg_picture = segment
     seg_src = segment(src) if (segment is not None and subject_tags) else None
     cut = widen._cut_edges(seg_src) if seg_src is not None else []
     lay_kw = dict(max_deg=a.layout_deg, S=a.layout_px, quality=a.quality, reference=ref,
@@ -263,6 +264,12 @@ def main(argv=None) -> int:
                              segment=segment, scene_of=scene_of)
         if g is not None:
             picture = g.image
+            # The sphere views continue only the body we started with, never a
+            # figure the extension happened to paint (round 2b).
+            body_mask = g.body
+
+            def seg_picture(img, body_mask=body_mask):
+                return body_mask if img.shape[:2] == body_mask.shape else segment(img)
 
             def place(img, g=g):
                 pano_, mask_ = sphere.place_focal(img, W, g.focal, *g.centre)
@@ -307,7 +314,7 @@ def main(argv=None) -> int:
     grow_segment = None
     if segment is not None:
         grow_segment = lambda img: segment(img, threshold=a.grow_threshold)  # noqa: E731
-    r = widen.widen(picture, tags, inpaint, opt, work, segment=segment,
+    r = widen.widen(picture, tags, inpaint, opt, work, segment=seg_picture,
                     grow_segment=grow_segment, layout=lay, place=place)
     src_mask = orig_mask if orig_mask is not None else r.source_mask
     seam = {}

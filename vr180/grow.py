@@ -40,6 +40,7 @@ class Grown:
     focal: float                         # pixels
     centre: tuple[float, float]          # the source's optical centre in the canvas
     log: dict = field(default_factory=dict)
+    body: np.ndarray | None = None       # the body we started with, in the canvas
 
     def source_mask(self) -> np.ndarray:
         m = np.zeros(self.image.shape[:2], np.uint8)
@@ -171,6 +172,19 @@ def body_reaches(seg: np.ndarray, side: str, frac: float = 0.02) -> bool:
     return bool(seg[_edge_rows(side, seg)].mean() > frac)
 
 
+def track_body(seg: np.ndarray, prev: np.ndarray) -> np.ndarray:
+    """The part of ``seg`` that is the body we started with: its connected pieces
+    that touch ``prev`` (the body so far, in the same frame). Round 2b: a figure
+    painted in the new band counted as "the body still reaches the edge", so the
+    canvas kept growing and grew more figures; a figure not joined to the body is
+    not the body."""
+    n, labels = cv2.connectedComponents(seg.astype(np.uint8), connectivity=8)
+    near = cv2.dilate(prev.astype(np.uint8), np.ones((9, 9), np.uint8)) > 0
+    keep = np.unique(labels[near & seg])
+    keep = keep[keep > 0]
+    return np.isin(labels, keep)
+
+
 def extend_side(src: np.ndarray, cut: list[str], grow: float, long_side: float, inpaint,
                 subject_tags, fill_tags, where: str | None, seed: int,
                 quality: str = prompts.QUALITY, reference: np.ndarray | None = None,
@@ -178,17 +192,19 @@ def extend_side(src: np.ndarray, cut: list[str], grow: float, long_side: float, 
                 refine_denoise: float = 0.35, rim: int = 8, step: float = 0.3,
                 segment=None, scene_of=None, max_steps: int = 8) -> Grown | None:
     """Grow each cut side ``step`` times the source's size at a time, and stop a
-    side as soon as the body no longer reaches its new edge (``segment``), or at
-    ``grow`` in all, or at ``max_deg``. None when nothing is cut.
+    side as soon as the body no longer reaches its new edge, or at ``grow`` in all,
+    or at ``max_deg``. None when nothing is cut or there is no segmenter.
 
-    Round 2, first try: growing a full source height at once gave Fubuki on the
-    sofa -- whose legs needed a few percent more -- a second body lying in the
-    empty space below her (and scene-first a third). What is beyond the body is
-    left to the sphere views, which paint scenery with no people.
+    In each new band only a fan from where the body crosses the old edge is painted
+    with the subject's tags; the rest of the band is scenery with no people -- the
+    laid-out scene (``scene_of(W, H, cx, cy)``, scene first) or a scene pass.
 
-    ``scene_of(W, H, cx, cy)`` (scene first): the laid-out scene as a flat picture
-    of that canvas; each step then paints the body only in a fan from where it
-    crosses the old edge, over the scene."""
+    Round 2's first two tries, in order: growing a full source height at once gave
+    Fubuki on the sofa a second body in the empty space below her; growing in steps
+    with the subject's tags over the whole band still did, and a new figure touching
+    the edge kept the growth going (``track_body``)."""
+    if segment is None:
+        return None
     h, w = src.shape[:2]
     f = focal(w, h, long_side)
     limit = side_growth(w, h, cut, grow, f, max_deg)
@@ -197,10 +213,13 @@ def extend_side(src: np.ndarray, cut: list[str], grow: float, long_side: float, 
     add = {s: 0 for s in limit}
     active = [s for s in SIDES if s in limit]
     canvas = src.copy()
-    prompt = prompts.subject_prompt(list(subject_tags), list(fill_tags), where, 0.0, quality)
+    body = segment(src)
+    her = prompts.subject_prompt(list(subject_tags), list(fill_tags), where, 0.0, quality)
+    scene_p = prompts.view_prompt(list(fill_tags), where, 0.0, quality)
+    scene_n = prompts.view_negative(prompts.NEGATIVE, where, 0.0)
     passes = []
     n = 0
-    seg_now = segment(canvas) if segment is not None else None
+    from .widen import _fan
     while active and n < max_steps:
         for side in list(active):
             size = h if side in ("top", "bottom") else w
@@ -208,7 +227,7 @@ def extend_side(src: np.ndarray, cut: list[str], grow: float, long_side: float, 
             if inc < 16:
                 active.remove(side)
                 continue
-            old = canvas
+            old, old_body = canvas, body
             oh, ow = old.shape[:2]
             add[side] += inc
             W, H, x0, y0 = canvas_geometry(w, h, add)
@@ -219,45 +238,49 @@ def extend_side(src: np.ndarray, cut: list[str], grow: float, long_side: float, 
             known = np.zeros((H, W), bool)
             canvas[dy:dy + oh, dx:dx + ow] = old
             known[dy:dy + oh, dx:dx + ow] = True
+            prev = np.zeros((H, W), bool)
+            prev[dy:dy + oh, dx:dx + ow] = old_body
             band = ~known
+            # Where the body crosses the old edge, and a fan from there into the band.
+            rows = _edge_rows(side, np.zeros((oh, ow)))
+            at_edge = np.zeros((oh, ow), bool)
+            at_edge[rows] = True
+            edge = np.zeros((H, W), np.uint8)
+            edge[dy:dy + oh, dx:dx + ow] = (old_body & at_edge).astype(np.uint8)
+            d = {"bottom": "down", "top": "up", "left": "left", "right": "right"}[side]
+            zone = (_fan(edge, d, inc, max(8, inc // 12), math.tan(math.radians(12)))
+                    if edge.sum() >= 4 else np.zeros((H, W), bool)) & band
+            rest = band & ~zone
+            region = _window(side, W, H, dx, dy, ow, oh, max(256, int(0.6 * inc)))
+            jobs = [(zone, her, prompts.SUBJECT_NEGATIVE)]
             if scene_of is None:
-                todo = band
-            else:
-                # The body only, from where it crosses the old edge, over the scene.
-                edge = np.zeros((H, W), np.uint8)
-                if seg_now is not None:
-                    seg_big = np.zeros((H, W), bool)
-                    seg_big[dy:dy + oh, dx:dx + ow] = seg_now
-                    rows = _edge_rows(side, np.zeros((oh, ow)))
-                    sub = np.zeros((oh, ow), bool)
-                    sub[rows] = True
-                    edge[dy:dy + oh, dx:dx + ow] = (seg_now & sub).astype(np.uint8)
-                from .widen import _fan
-                d = {"bottom": "down", "top": "up", "left": "left", "right": "right"}[side]
-                todo = (_fan(edge, d, inc, max(8, inc // 12), math.tan(math.radians(12)))
-                        if edge.sum() >= 4 else np.zeros((H, W), bool)) & band
-            ox0, oy0 = (dx, dy)
-            region = _window(side, W, H, ox0, oy0, ow, oh, max(256, int(0.6 * inc)))
-            m = todo[region]
-            if m.mean() >= 0.002:
+                jobs.append((rest, scene_p, scene_n))       # scenery, no people
+            painted = []
+            for k, (todo, prompt, negative) in enumerate(jobs):
+                m = todo[region]
+                painted.append(round(float(m.mean()), 3))
+                if m.mean() < 0.002:
+                    continue
                 crop = canvas[region]
                 ch, cw = m.shape
                 gw, gh = _gen_size(ch, cw, budget)
                 small = cv2.resize(crop, (gw, gh), interpolation=cv2.INTER_AREA)
                 sm = cv2.resize(m.astype(np.uint8), (gw, gh), interpolation=cv2.INTER_NEAREST) > 0
                 sm = cv2.dilate(sm.astype(np.uint8), np.ones((5, 5), np.uint8)) > 0
-                init = small if scene_of is not None else _prefill(small, sm)
+                # Over a laid-out scene the body starts from the scene; otherwise
+                # from the blur (and the scene pass sees the body just painted).
+                init = small if (scene_of is not None and k == 0) else _prefill(small, sm)
                 control = init.copy()
-                control[sm] = 0                      # NoobAI Inpainting: the hole pure black
-                out = inpaint(init, (sm * 255).astype(np.uint8), prompt, prompts.SUBJECT_NEGATIVE,
-                              seed + 10 * len(passes), control=control, reference=reference,
-                              steps=steps)
+                control[sm] = 0                  # NoobAI Inpainting: the hole pure black
+                out = inpaint(init, (sm * 255).astype(np.uint8), prompt, negative,
+                              seed + 10 * len(passes) + k, control=control,
+                              reference=reference, steps=steps)
                 big = cv2.resize(out, (cw, ch), interpolation=cv2.INTER_LANCZOS4)
                 _paste(canvas, region, big, m)
-            seg_now = segment(canvas) if segment is not None else None
-            reaches = seg_now is not None and body_reaches(seg_now, side)
-            passes.append({"side": side, "added": inc, "painted": round(float(m.mean()), 3),
-                           "body_reaches_edge": reaches})
+            body = track_body(segment(canvas), prev)
+            reaches = body_reaches(body, side)
+            passes.append({"side": side, "added": inc, "painted": painted,
+                           "crossing_px": int(edge.sum()), "body_reaches_edge": reaches})
             if not reaches or add[side] >= limit[side]:
                 active.remove(side)
         n += 1
@@ -267,14 +290,21 @@ def extend_side(src: np.ndarray, cut: list[str], grow: float, long_side: float, 
     hole[y0:y0 + h, x0:x0 + w] = False
     tiles = 0
     if refine_denoise > 0:
-        k = np.ones((2 * rim + 1, 2 * rim + 1), np.uint8)
-        rim_band = (cv2.dilate(hole.astype(np.uint8), k) > 0) & ~hole
-        tiles = refine(canvas, hole | rim_band, inpaint, prompt, prompts.SUBJECT_NEGATIVE,
+        k3 = np.ones((2 * rim + 1, 2 * rim + 1), np.uint8)
+        rim_band = (cv2.dilate(hole.astype(np.uint8), k3) > 0) & ~hole
+        near_body = cv2.dilate(body.astype(np.uint8), np.ones((33, 33), np.uint8)) > 0
+        todo = hole | rim_band
+        # The body and its surroundings with her tags; the rest as scenery.
+        tiles = refine(canvas, todo & near_body, inpaint, her, prompts.SUBJECT_NEGATIVE,
                        seed + 500, refine_denoise, steps=steps)
+        tiles += refine(canvas, todo & ~near_body, inpaint, scene_p, scene_n,
+                        seed + 700, refine_denoise, steps=steps)
         # Inside the rim, the source stays exactly as it was.
         canvas[y0 + rim:y0 + h - rim, x0 + rim:x0 + w - rim] = src[rim:h - rim, rim:w - rim]
-    return Grown(canvas, (x0, y0, w, h), f, (x0 + w / 2, y0 + h / 2),
-                 {"cut": cut, "grow": grow, "step": step, "limit": limit, "added": add,
-                  "canvas": [W, H], "passes": passes, "refine_tiles": tiles,
-                  "refine_denoise": refine_denoise, "rim": rim,
-                  "order": "body-first" if scene_of is None else "scene-first", "prompt": prompt})
+    g = Grown(canvas, (x0, y0, w, h), f, (x0 + w / 2, y0 + h / 2),
+              {"cut": cut, "grow": grow, "step": step, "limit": limit, "added": add,
+               "canvas": [W, H], "passes": passes, "refine_tiles": tiles,
+               "refine_denoise": refine_denoise, "rim": rim,
+               "order": "body-first" if scene_of is None else "scene-first", "prompt": her})
+    g.body = body
+    return g

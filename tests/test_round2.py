@@ -46,10 +46,10 @@ def green_is_her(rgb, threshold=0.5):
 def test_extend_side_keeps_the_source_and_lands_it_where_it_was():
     src = checker(416, 608)
     fake = ColourForge()
-    # The fake paints the body green and green counts as her, so the body always
-    # reaches the new edge: two steps of 0.3 to the 0.6 limit.
+    # Her legs run off the bottom; the fake paints her fan green and green counts as
+    # her, so the body keeps reaching the new edge: two steps of 0.3 to the limit.
     g = grow.extend_side(src, ["bottom"], 0.6, 60.0, fake, ("1girl",), ["indoors"], "indoors",
-                         seed=1, refine_denoise=0.35, step=0.3, segment=green_is_her)
+                         seed=1, refine_denoise=0.35, step=0.3, segment=her_segment(src))
     x0, y0, w, h = g.rect
     assert (x0, y0) == (0, 0) and g.log["added"] == {"bottom": 2 * int(0.3 * 608)}
     assert [p["added"] for p in g.log["passes"]] == [182, 182]
@@ -57,7 +57,10 @@ def test_extend_side_keeps_the_source_and_lands_it_where_it_was():
     assert np.array_equal(g.image[rim:h - rim, rim:w - rim], src[rim:h - rim, rim:w - rim])
     gen = [c for c in fake.calls if not c["touch_up"]]
     ref = [c for c in fake.calls if c["touch_up"]]
-    assert len(gen) == 2 and all(c["control"] and c["her"] for c in gen)
+    # Each step: her fan with her tags, then the rest of the band as scenery.
+    assert [c["her"] for c in gen] == [True, False, True, False]
+    assert all(c["control"] for c in gen)
+    assert all("no humans" in c["prompt"] for c in gen if not c["her"])
     assert ref and all(c["denoise"] == 0.35 and not c["control"] for c in ref)
     # The grown canvas keeps the source's optical centre: on the sphere the source
     # sits exactly where it would alone.
@@ -76,8 +79,22 @@ def test_growth_stops_once_the_body_ends():
     g = grow.extend_side(src, ["bottom"], 1.0, 60.0, fake, ("1girl",), [], None, seed=1,
                          refine_denoise=0, step=0.3,
                          segment=lambda rgb, threshold=0.5: np.zeros(rgb.shape[:2], bool))
-    assert g.log["added"] == {"bottom": int(0.3 * 608)} and len(fake.calls) == 1
+    assert g.log["added"] == {"bottom": int(0.3 * 608)}
+    assert [c["her"] for c in fake.calls] == [False]         # no body crossing: scenery only
     assert g.log["passes"][0]["body_reaches_edge"] is False
+
+
+def test_a_new_figure_in_the_band_is_not_the_body():
+    # Round 2b: a figure painted in the new band, touching the edge but not joined
+    # to her, kept the canvas growing. The body is only what connects to her.
+    seg = np.zeros((100, 100), bool)
+    seg[:50, 40:60] = True                       # her, down to row 50
+    seg[70:100, 10:25] = True                    # someone else, at the bottom edge
+    prev = np.zeros((100, 100), bool)
+    prev[:40, 40:60] = True
+    body = grow.track_body(seg, prev)
+    assert body[:50, 40:60].all() and not body[70:, 10:25].any()
+    assert not grow.body_reaches(body, "bottom")
 
 
 def test_nothing_cut_grows_nothing():
