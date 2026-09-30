@@ -167,6 +167,14 @@ def parse(argv=None):
                         "and her body fixed, so the floor and furniture around her legs come from "
                         "the same pass as the room; the picture keeps only the source and her "
                         "body, and her outline is seam-repainted")
+    p.add_argument("--keep-threshold", type=float, default=0.15,
+                   help="with --layout-owns-scenery: the segmenter threshold for what counts as "
+                        "her inside the extension's painted areas")
+    p.add_argument("--inner-seam-outer", type=int, default=24, metavar="PX",
+                   help="how far past the source's edge the inner seam repaint reaches (round 10: "
+                        "24 px hid a sharpness step, not the layout's different shading)")
+    p.add_argument("--inner-seam-denoise", type=float, default=0.0,
+                   help="the inner seam repaint's denoise (0: --seam-repaint's)")
     p.add_argument("--extend-step", type=float, default=0.3,
                    help="grow a cut side this fraction of the source's size at a time, and stop "
                         "once the body no longer reaches the new edge (round 2: growing it all at "
@@ -398,7 +406,13 @@ def main(argv=None) -> int:
         # in the same pass as the room (round 8: two separately made floors met at
         # the grown picture's edge).
         gx, gy, gw, gh = grown_g.rect
-        her = grown_g.body | (grown_g.fans if grown_g.fans is not None else False)
+        # Her tracked body, and inside the areas the extension painted with her
+        # tags, whatever the segmenter sees as her at a low threshold (round 10:
+        # keeping the whole fans kept the extension's own floor and furniture
+        # too; keeping only the outline lost a hand and feet in round 9).
+        her = grown_g.body.copy()
+        if grown_g.fans is not None and grown_g.fans.any():
+            her |= grown_g.fans & segment(picture, threshold=a.keep_threshold)
         keep = cv2.dilate(her.astype(np.uint8), np.ones((11, 11), np.uint8)) > 0
         keep[gy:gy + gh, gx:gx + gw] = True
         pano0, m0, _f = place(picture)
@@ -439,9 +453,10 @@ def main(argv=None) -> int:
         if orig_mask is not None:
             # Round 3: a straight line where the source met its grown side (the
             # full-resolution pass repaints only 8 px of the source's rim).
-            seam["repaint_inner"] = seams.repaint(r.pano, orig_mask > 0, inpaint, sp, sn,
-                                                  a.seed + 9500, denoise=a.seam_repaint,
-                                                  steps=a.steps)
+            seam["repaint_inner"] = seams.repaint(
+                r.pano, orig_mask > 0, inpaint, sp, sn, a.seed + 9500,
+                denoise=a.inner_seam_denoise or a.seam_repaint, outer=a.inner_seam_outer,
+                steps=a.steps)
         if silhouette is not None:
             # Her outline, where her body meets the layout's scenery (J).
             seam["repaint_silhouette"] = seams.repaint(r.pano, silhouette, inpaint, sp, sn,
