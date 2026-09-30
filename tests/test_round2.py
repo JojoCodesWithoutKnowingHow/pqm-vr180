@@ -207,3 +207,24 @@ def test_compose_only_details_the_layout():
     assert not any(c["her"] for c in fake.calls)
     assert {v["kind"] for v in r.log["views"]} == {"scene"}
     assert r.log["front_unfilled"] < 0.002
+
+
+def test_hires_layout_refines_in_tiles_and_compose_zero_calls_nothing(tmp_path):
+    # Round 4: the layout composed at S, scaled up and refined in tiles (the hires
+    # fix); with --compose 0 the views make no calls -- the hires layout is the scene.
+    from vr180 import layout, widen
+    src = checker(416, 608)
+    pano, mask, _f = sphere.place(src, 1024, 60.0)
+    fake = ColourForge()
+    lay, log = layout.make_layout(pano, mask > 0, ["indoors"], "indoors", fake, seed=1, S=256,
+                                  hires=512, hires_denoise=0.4, work=tmp_path)
+    first, rest = fake.calls[0], fake.calls[1:]
+    assert first["shape"] == (256, 256) and not first["touch_up"]
+    assert rest and all(c["touch_up"] and c["denoise"] == 0.4 and c["shape"] == (512, 512)
+                        for c in rest)
+    assert log["hires"] == 512 and log["hires_tiles"] == len(rest)
+    fake2 = ColourForge()
+    opt = widen.Options(width=1024, view_px=256, seam_px=8, taper=False, layout_denoise=0.0,
+                        compose=True)
+    r = widen.widen(src, ["indoors"], fake2, opt, None, say=lambda s: None, layout=lay)
+    assert fake2.calls == [] and r.log["front_unfilled"] < 0.002

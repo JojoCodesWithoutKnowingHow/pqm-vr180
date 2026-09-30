@@ -492,8 +492,11 @@ def widen(src: np.ndarray, fill_tags: list[str], inpaint: Inpainter, opt: Option
                     init, extra = laid, {"denoise": opt.layout_denoise}
                     if opt.compose:
                         extra["touch_up"] = True     # a detail pass: no inpaint ControlNet
-                gen = inpaint(init, gen_mask, prompt, negative, opt.seed + n,
-                              control=control, reference=ref, steps=steps, **extra)
+                if opt.compose and laid is not None and kind == "scene" and opt.layout_denoise <= 0:
+                    gen = laid                       # the hires layout as it is (round 4, H0)
+                else:
+                    gen = inpaint(init, gen_mask, prompt, negative, opt.seed + n,
+                                  control=control, reference=ref, steps=steps, **extra)
         secs = time.time() - t0
         if kind == "subject" and grow is not None:
             # Grow the subject only from the continuation zone, so a stray figure

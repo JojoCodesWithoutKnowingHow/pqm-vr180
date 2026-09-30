@@ -133,6 +133,10 @@ def parse(argv=None):
     p.add_argument("--layout-deg", type=float, default=100.0,
                    help="the layout fisheye reaches this far off straight ahead")
     p.add_argument("--layout-px", type=int, default=1024)
+    p.add_argument("--layout-hires", type=int, default=0, metavar="PX",
+                   help="scale the layout up to PX and refine it in tiles (the hires fix), so "
+                        "the scene reaches the panorama's density (0: off; 2048 ~ the panorama)")
+    p.add_argument("--layout-hires-denoise", type=float, default=0.4)
     p.add_argument("--layout-strong", action="store_true",
                    help="weight the layout's fisheye words (round 1: one layout came back as "
                         "an ordinary wide-angle picture)")
@@ -153,11 +157,12 @@ def parse(argv=None):
     p.add_argument("--order", choices=("body-first", "scene-first"), default="body-first",
                    help="scene-first (with --layout fisheye and --extend-side): lay the scene "
                         "out, then paint the body over it in a fan from the cut edge")
-    p.add_argument("--compose", type=float, default=0.0, metavar="D",
+    p.add_argument("--compose", type=float, default=-1.0, metavar="D",
                    help="compose (G): with --layout fisheye, the laid-out scene is final; every "
                         "view is a detail pass over it at denoise D, no inpaint ControlNet, no "
                         "view with the subject's tags (0: off). Round 2: E repainted the layout "
-                        "at 0.7 and inked a line at each view's edge; F grew new bodies")
+                        "at 0.7 and inked a line at each view's edge; F grew new bodies. 0: no "
+                        "detail pass, the (hires) layout as it is; below 0: off")
     p.add_argument("--seam-repaint", type=float, default=0.0, metavar="D",
                    help="repaint a narrow band across the picture's edge on the sphere at this "
                         "denoise (0: off). Use with --soften-rim 0")
@@ -213,8 +218,9 @@ def main(argv=None) -> int:
                         reference=a.reference and a.method == "noob",
                         steps=a.steps, taper=a.taper, view_fov=a.view_fov, view_px=a.view_px,
                         join=a.join, zone_spread_deg=a.zone_spread,
-                        layout_denoise=a.compose or a.layout_denoise, compose=a.compose > 0)
-    if a.compose > 0 and a.layout != "fisheye":
+                        layout_denoise=a.compose if a.compose >= 0 else a.layout_denoise,
+                        compose=a.compose >= 0)
+    if a.compose >= 0 and a.layout != "fisheye":
         print("--compose needs --layout fisheye: it only details the laid-out scene",
               file=sys.stderr)
         return 2
@@ -254,7 +260,8 @@ def main(argv=None) -> int:
     seg_src = segment(src) if (segment is not None and subject_tags) else None
     cut = widen._cut_edges(seg_src) if seg_src is not None else []
     lay_kw = dict(max_deg=a.layout_deg, S=a.layout_px, quality=a.quality, reference=ref,
-                  steps=a.steps, work=work, strong=a.layout_strong)
+                  steps=a.steps, work=work, strong=a.layout_strong, hires=a.layout_hires,
+                  hires_denoise=a.layout_hires_denoise)
     if a.extend_side > 0 and seg_src is not None:
         scene_of = None
         if a.order == "scene-first" and a.layout == "fisheye":
@@ -336,6 +343,12 @@ def main(argv=None) -> int:
             sn = prompts.view_negative(a.negative, where, 0.0)
         seam["repaint"] = seams.repaint(r.pano, r.source_mask > 0, inpaint, sp, sn,
                                         a.seed + 9000, denoise=a.seam_repaint, steps=a.steps)
+        if orig_mask is not None:
+            # Round 3: a straight line where the source met its grown side (the
+            # full-resolution pass repaints only 8 px of the source's rim).
+            seam["repaint_inner"] = seams.repaint(r.pano, orig_mask > 0, inpaint, sp, sn,
+                                                  a.seed + 9500, denoise=a.seam_repaint,
+                                                  steps=a.steps)
     seam["ratio_before"] = round(post.detail_ratio(r.pano, src_mask > 0), 3)
     if a.detail_match:
         r.pano, seam["detail_amount"] = post.detail_match(r.pano, src_mask > 0)
