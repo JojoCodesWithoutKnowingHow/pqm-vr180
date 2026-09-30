@@ -654,3 +654,38 @@ def test_layout_close_negative_reaches_the_full_prompt_layout(tmp_path, monkeypa
                        full_prompt="1girl, sitting", full_negative=neg)
     assert all(c["negative"] == neg for c in fake.calls)
     assert "giantess" in fake.calls[0]["negative"]
+
+
+def test_cli_layout_omit_leaves_tags_out_of_the_layout_only(tmp_path, monkeypatch):
+    # Round 22: 'breasts' out of the layout's prompt; ADetailer still has it.
+    from vr180 import cli, forge, subject
+    src = checker(416, 608)
+    Image.fromarray(src).save(tmp_path / "src.png")
+    seg_model = tmp_path / "seg.onnx"
+    seg_model.write_bytes(b"x")
+    fake = ColourForge()
+
+    class FakeSeg:
+        def __init__(self, path):
+            self.fn = her_segment(src)
+
+        def __call__(self, rgb, threshold=0.5):
+            return self.fn(rgb, threshold)
+
+    monkeypatch.setattr(subject, "Segmenter", FakeSeg)
+    monkeypatch.setattr(forge.Forge, "resolve", lambda self, s: [])
+    monkeypatch.setattr(forge.Forge, "inpaint",
+                        lambda self, image, mask, prompt, negative, seed, s, **kw:
+                        fake(image, mask, prompt, negative, seed, **kw))
+    rc = cli.main([str(tmp_path / "src.png"), "-o", str(tmp_path / "o_180_LR.jpg"), "--checkpoint",
+                   "c", "--tags", "indoors, room", "--subject-tags", "1girl, skirt, breasts",
+                   "--subject-framing", "sitting", "--long-side", "60",
+                   "--width", "1024", "--view-px", "256", "--segment-model", str(seg_model),
+                   "--pano-only", "--join", "hard", "--extend-in-layout", "--layout-full-prompt",
+                   "--layout-omit", "Breasts", "--extend-side", "0.6", "--layout", "fisheye",
+                   "--layout-px", "256", "--layout-hires", "512", "--compose", "0",
+                   "--seam-repaint", "0.4", "--soften-rim", "0", "--adetail", "0.2"])
+    assert rc == 0
+    log = json.loads((tmp_path / "o_180_LR.work" / "log.json").read_text(encoding="utf-8"))
+    assert "breasts" not in log["layout"]["prompt"] and "skirt" in log["layout"]["prompt"]
+    assert "breasts" in log["extend_in_layout"]["prompt"]

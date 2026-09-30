@@ -161,6 +161,11 @@ def parse(argv=None):
                    help="the source's pose and framing words (e.g. 'sitting, crossed legs, "
                         "cowboy shot'); with --extend-regional they go into her region's prompt "
                         "so it knows where her body ends (round 7)")
+    p.add_argument("--layout-omit", default="", metavar="TAGS",
+                   help="round 22, with --layout-full-prompt: subject tags left out of the "
+                        "layout's prompt only (ADetailer keeps them), e.g. 'breasts, nipples' "
+                        "(r18-21: the layout filled the floor in front of Yamato with a giant "
+                        "close-up of her chest)")
     p.add_argument("--layout-close-negative", action="store_true",
                    help="round 21, with --layout-full-prompt: add close-up / giantess / "
                         "multiple views to the layout's negative (r18-20: a giant second "
@@ -353,7 +358,9 @@ def main(argv=None) -> int:
         full_p = None
         if a.layout_full_prompt:
             lens = ["(fisheye:1.3)", "fisheye lens"] if a.layout_strong else ["fisheye"]
-            full_p = prompts.subject_prompt(lens + list(subject_tags)
+            omit = {t.lower() for t in prompts.split_tags(a.layout_omit)}
+            full_p = prompts.subject_prompt(lens + [t for t in subject_tags
+                                                    if t.lower() not in omit]
                                             + prompts.pose_words(a.subject_framing),
                                             tags, where, 0.0, a.quality)
         lay, extra_log["layout"], fish = layout.make_layout(
