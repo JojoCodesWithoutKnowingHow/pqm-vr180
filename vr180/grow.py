@@ -276,7 +276,11 @@ def extend_side(src: np.ndarray, cut: list[str], grow: float, long_side: float, 
             zone = (_fan(edge, d, inc, max(8, span // 8), math.tan(math.radians(12)))
                     if span else np.zeros((H, W), bool)) & band
             rest = band & ~zone
-            region = _window(side, W, H, dx, dy, ow, oh, max(256, int(0.6 * inc)))
+            # The whole canvas, scaled to the budget: the model must see her --
+            # face and all -- or it paints a new person where it continues her body
+            # (dev5 on the pod: strip windows without her head gave Fubuki on the bed
+            # four more Fubukis). Round 1's one-canvas extension had far fewer.
+            region = (slice(0, H), slice(0, W))
             jobs = [(zone, her, prompts.SUBJECT_NEGATIVE)]
             if scene_of is None:                            # scenery, no people
                 jobs.append((rest, prompts.view_prompt(list(fill_tags), where, pitch_of[side], quality),
@@ -298,9 +302,18 @@ def extend_side(src: np.ndarray, cut: list[str], grow: float, long_side: float, 
                 init = small if (scene_of is not None and k == 0) else _prefill(small, sm)
                 control = init.copy()
                 control[sm] = 0                  # NoobAI Inpainting: the hole pure black
-                out = inpaint(init, (sm * 255).astype(np.uint8), prompt, negative,
-                              seed + 10 * len(passes) + k, control=control,
-                              reference=reference, steps=steps)
+                out = None
+                for attempt in range(2):
+                    try:
+                        out = inpaint(init, (sm * 255).astype(np.uint8), prompt, negative,
+                                      seed + 10 * len(passes) + k + 997 * attempt,
+                                      control=control, reference=reference, steps=steps)
+                        break
+                    except Exception as exc:   # a black (NaN) fill: dev5, Nami
+                        if "black" not in str(exc):
+                            raise
+                if out is None:
+                    out = init                 # keep the pre-fill; the sphere views go on
                 big = cv2.resize(out, (cw, ch), interpolation=cv2.INTER_LANCZOS4)
                 _paste(canvas, region, big, m)
             body = track_body(segment(canvas), prev)
