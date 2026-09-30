@@ -167,6 +167,9 @@ def parse(argv=None):
                         "and her body fixed, so the floor and furniture around her legs come from "
                         "the same pass as the room; the picture keeps only the source and her "
                         "body, and her outline is seam-repainted")
+    p.add_argument("--source-fade", type=int, default=32, metavar="PX",
+                   help="with --layout-owns-scenery: the original fades into the layout over "
+                        "this many px inside its rectangle")
     p.add_argument("--keep-threshold", type=float, default=0.15,
                    help="with --layout-owns-scenery: the segmenter threshold for what counts as "
                         "her inside the extension's painted areas")
@@ -417,20 +420,26 @@ def main(argv=None) -> int:
         keep = cv2.dilate(her.astype(np.uint8), np.ones((11, 11), np.uint8)) > 0
         keep[gy:gy + gh, gx:gx + gw] = True
         pano0, m0, _f = place(picture)
-        # The layout is told its fixed area ends ~10 px inside what is kept: the
-        # inpaint inks an outline along the edge of what it keeps, and pasting the
-        # source and her back then covers that line (round 11: the original's
-        # rectangle traced in thin lines through Fubuki's bed).
-        inset = cv2.erode(keep.astype(np.uint8), np.ones((21, 21), np.uint8)) > 0
-        kp, _km, _kf = place((inset * 255).astype(np.uint8))
+        # The layout is told exactly what is kept. dev17 inset it ~10 px to hide the
+        # original's rectangle lines, but those came from the extension's rim strip
+        # (fixed in dev18), and the gap let the layout continue her body on its own:
+        # a second pair of feet under the extension's (round 13, Fubuki's sofa).
+        kp, _km, _kf = place((keep * 255).astype(np.uint8))
         known = (kp > 127) & (m0 > 0)
         lay, extra_log["layout"] = layout.make_layout(pano0, known, tags, where, inpaint,
                                                       a.seed + 7000, **lay_kw)
         ch, cw = picture.shape[:2]
         scene = sphere.flat_of(lay, cw, ch, grown_g.focal, *grown_g.centre)
-        # A soft edge a few pixels either side of what is kept (keep is her body
-        # grown 5 px, so the fade falls on the layout's side of her outline).
-        wk = np.clip(cv2.GaussianBlur(keep.astype(np.float32), (0, 0), 2.0), 0, 1)[..., None]
+        # Her body: kept, with a soft edge of a few pixels (her body grown 5 px, so
+        # the fade falls on the layout's side of her outline). The original: faded
+        # into the layout over ``--source-fade`` px inside its rectangle, where the
+        # layout holds its own softer copy of it -- a 4 px switch at the rectangle's
+        # edge read as a hard line tracing it (round 13, worst on Fubuki's bed).
+        body_keep = cv2.dilate(her.astype(np.uint8), np.ones((11, 11), np.uint8)).astype(np.float32)
+        rect = np.zeros(keep.shape, np.uint8)
+        rect[gy:gy + gh, gx:gx + gw] = 1
+        ramp = np.clip(cv2.distanceTransform(rect, cv2.DIST_L2, 5) / max(a.source_fade, 1), 0, 1)
+        wk = np.maximum(np.clip(cv2.GaussianBlur(body_keep, (0, 0), 2.0), 0, 1), ramp)[..., None]
         picture = (picture.astype(np.float32) * wk + scene.astype(np.float32) * (1 - wk)
                    ).round().astype(np.uint8)
         Image.fromarray(picture).save(work / "flat_extended.png")
