@@ -734,7 +734,7 @@ def test_cli_auto_pipeline_picks_l_when_her_body_runs_out_of_frame(tmp_path, mon
                    "--pano-only", "--join", "hard", "--auto-pipeline", "--extend-side", "0.6",
                    "--extend-refine", "0.35", "--layout", "fisheye", "--layout-px", "256",
                    "--layout-hires", "512", "--compose", "0", "--seam-repaint", "0.4",
-                   "--soften-rim", "0", "--adetail", "0.27"])
+                   "--soften-rim", "0", "--adetail", "0.27", "--bridge", "64"])
     assert rc == 0
     assert len(calls) == 1                                   # the extension made once
     log = json.loads((tmp_path / "o_180_LR.work" / "log.json").read_text(encoding="utf-8"))
@@ -745,3 +745,28 @@ def test_cli_auto_pipeline_picks_l_when_her_body_runs_out_of_frame(tmp_path, mon
     else:
         assert "layout_owns_scenery" in log and "extend_side" in log
         assert "no humans" in log["layout"]["prompt"] and "adetail" not in log
+
+
+def test_bridge_regenerates_only_a_band_across_each_cut_edge():
+    # Round 23: the join at the frame's edge generated anew, the hole black.
+    from vr180 import inlayout
+    H, W = 1400, 1200
+    canvas = np.full((H, W, 3), 90, np.uint8)
+    rect = (200, 0, 800, 900)                          # cut at the bottom
+    fake = ColourForge()
+    log = inlayout.bridge(canvas, rect, ["bottom"], fake, "1girl", "", seed=1, band=128)
+    assert log["tiles"] >= 1 and all(c["control"] for c in fake.calls)
+    changed = np.abs(canvas.astype(int) - 90).max(-1) > 0
+    assert changed[900:1000, 300:900].all()            # just outside the edge
+    assert changed[885, 300:900].any()                 # and a little into the source
+    assert not changed[:860].any() and not changed[1060:].any()
+    assert not changed[:, :190].any() and not changed[:, 1010:].any()
+
+
+def test_bridge_covers_a_long_edge_in_tiles():
+    from vr180 import inlayout
+    canvas = np.full((1200, 3000, 3), 90, np.uint8)
+    fake = ColourForge()
+    log = inlayout.bridge(canvas, (0, 0, 3000, 800), ["bottom"], fake, "1girl", "", seed=1)
+    changed = np.abs(canvas.astype(int) - 90).max(-1) > 0
+    assert log["tiles"] >= 3 and changed[820:900, 30:2970].all()
