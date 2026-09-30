@@ -161,6 +161,12 @@ def parse(argv=None):
                    help="the source's pose and framing words (e.g. 'sitting, crossed legs, "
                         "cowboy shot'); with --extend-regional they go into her region's prompt "
                         "so it knows where her body ends (round 7)")
+    p.add_argument("--layout-fine", type=int, default=0, metavar="PX",
+                   help="round 33 (the two-scale layout), with --extend-in-layout "
+                        "--layout-full-prompt: after the layout (composed at --layout-px), her "
+                        "body outside the source is generated anew from a hole on the fisheye "
+                        "at PX, in a 1024 px window holding the whole source (r31-32: 1536/2048 "
+                        "layouts align the leg but compose a second figure)")
     p.add_argument("--layout-mask-grow", type=int, default=2, metavar="PX",
                    help="round 30: how far the layout's mask reaches into the source (fisheye "
                         "px; 2 was the fixed 5x5 dilation)")
@@ -422,6 +428,17 @@ def main(argv=None) -> int:
             region=region, full_prompt=full_p,
             full_negative=(prompts.CLOSE_NEGATIVE + ", " + prompts.SUBJECT_NEGATIVE
                            if a.layout_close_negative else None), **lay_kw)
+        if a.layout_fine > 0 and segment is not None:
+            fneg = (prompts.CLOSE_NEGATIVE + ", " + prompts.SUBJECT_NEGATIVE
+                    if a.layout_close_negative else prompts.SUBJECT_NEGATIVE)
+            fish, extra_log["layout_fine"] = inlayout.fine_pass(
+                fish, src, seg_src, cut, long_side, W, a.layout_deg, segment, inpaint,
+                full_p or prompts.subject_prompt(list(subject_tags), tags, where, 0.0, a.quality),
+                fneg, a.seed + 7500, size=a.layout_fine, steps=a.steps, reference=ref,
+                mask_blur=a.layout_mask_blur, grow_frac=a.extend_side or 1.0,
+                max_side_deg=a.extend_max_deg)
+            if work is not None:
+                Image.fromarray(fish).save(work / "layout_fisheye_fine.png")
         res = inlayout.extend(src, seg_src, cut, long_side, W, fish, a.layout_deg, inpaint,
                               subject_tags, tags, where, a.seed + 5000, quality=a.quality,
                               reference=ref, steps=a.steps, grow_frac=a.extend_side or 1.0,

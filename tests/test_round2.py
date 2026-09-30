@@ -896,3 +896,81 @@ def test_cli_layout_mask_grow_and_blur_reach_forge(tmp_path, monkeypatch):
     assert rc == 0
     assert fake.calls[0]["mask_blur"] == 0 and "1girl" in fake.calls[0]["prompt"]
     assert all(c["mask_blur"] is None for c in fake.calls[1:])   # only the layout's call
+
+
+def test_fine_pass_regenerates_her_body_outside_the_source_with_the_source_in_view():
+    # Round 33: the two-scale layout's fine pass on a 1024 px fisheye.
+    from vr180 import inlayout, layout
+    src = checker(416, 608)
+    seg = np.zeros(src.shape[:2], bool)
+    seg[304:, 166:250] = True                           # a leg cut at the bottom
+    S = 1024
+    pano, m0, _f = sphere.place(src, 1024, 60.0)
+    known = layout.to_fisheye(((m0 > 0) * 255).astype(np.uint8), S, 100.0, cv2.INTER_NEAREST) > 127
+    ys, xs = np.nonzero(known)
+    fish = np.full((S, S, 3), 90, np.uint8)
+    lay_body = np.zeros((S, S), bool)
+    cx = (xs.min() + xs.max()) // 2
+    lay_body[ys.min() + 20:ys.max() + 60, cx - 8:cx + 8] = True   # the layout's leg, joined
+    fake = ColourForge()
+    out, log = inlayout.fine_pass(fish, src, seg, ["bottom"], 60.0, 1024, 100.0,
+                                  lambda rgb, threshold=0.5: lay_body, fake, "1girl", "", seed=1,
+                                  size=S, window=512)
+    assert len(fake.calls) == 1
+    c = fake.calls[0]
+    assert c["control"] and not c["touch_up"] and c["mask_blur"] == 4 and c["shape"] == (512, 512)
+    left, top, side = log["window"]
+    assert top <= ys.min() and top + side >= ys.max() and left <= xs.min() and left + side >= xs.max()
+    changed = np.abs(out.astype(int) - 90).max(-1) > 0
+    assert not (changed & known).any()                  # the source untouched
+    below = changed[ys.max() + 5:ys.max() + 40, cx - 6:cx + 6]
+    assert below.all()                                  # her leg past the edge, at full weight
+    assert not changed[:ys.min() - 80].any()            # nothing far from her
+
+
+def test_fine_pass_skips_without_a_body_outside_the_source():
+    from vr180 import inlayout
+    src = checker(416, 608)
+    seg = np.zeros(src.shape[:2], bool)
+    seg[304:, 166:250] = True
+    fish = np.full((512, 512, 3), 90, np.uint8)
+    fake = ColourForge()
+    out, log = inlayout.fine_pass(fish, src, seg, ["bottom"], 60.0, 1024, 100.0,
+                                  lambda rgb, threshold=0.5: np.zeros(rgb.shape[:2], bool),
+                                  fake, "1girl", "", seed=1, size=512, window=256)
+    assert fake.calls == [] and "skipped" in log
+
+
+def test_cli_layout_fine_runs_between_the_layout_and_the_flat_canvas(tmp_path, monkeypatch):
+    from vr180 import cli, forge, subject
+    src = checker(416, 608)
+    Image.fromarray(src).save(tmp_path / "src.png")
+    seg_model = tmp_path / "seg.onnx"
+    seg_model.write_bytes(b"x")
+    fake = ColourForge()
+
+    class FakeSeg:
+        def __init__(self, path):
+            self.fn = her_segment(src)
+
+        def __call__(self, rgb, threshold=0.5):
+            return self.fn(rgb, threshold)
+
+    monkeypatch.setattr(subject, "Segmenter", FakeSeg)
+    monkeypatch.setattr(forge.Forge, "resolve", lambda self, s: [])
+    monkeypatch.setattr(forge.Forge, "inpaint",
+                        lambda self, image, mask, prompt, negative, seed, s, **kw:
+                        fake(image, mask, prompt, negative, seed, **kw))
+    rc = cli.main([str(tmp_path / "src.png"), "-o", str(tmp_path / "o_180_LR.jpg"), "--checkpoint",
+                   "c", "--tags", "indoors, room", "--subject-tags", "1girl, skirt",
+                   "--subject-framing", "sitting", "--long-side", "60",
+                   "--width", "1024", "--view-px", "256", "--segment-model", str(seg_model),
+                   "--pano-only", "--join", "hard", "--extend-in-layout", "--layout-full-prompt",
+                   "--layout-mask-grow", "0", "--layout-mask-blur", "4", "--layout-fine", "512",
+                   "--extend-side", "0.6", "--layout", "fisheye", "--layout-px", "256",
+                   "--layout-hires", "512", "--compose", "0", "--seam-repaint", "0.4",
+                   "--soften-rim", "0", "--adetail", "0.27"])
+    assert rc == 0
+    log = json.loads((tmp_path / "o_180_LR.work" / "log.json").read_text(encoding="utf-8"))
+    assert "layout_fine" in log
+    assert (tmp_path / "o_180_LR.work" / "layout_fisheye_fine.png").exists() or "skipped" in log["layout_fine"]
