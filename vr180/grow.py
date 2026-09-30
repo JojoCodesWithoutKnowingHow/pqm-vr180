@@ -104,6 +104,18 @@ def _paste(canvas: np.ndarray, region, img: np.ndarray, mask: np.ndarray) -> Non
                       ).round().astype(np.uint8)
 
 
+def _paste_across(canvas: np.ndarray, img: np.ndarray, band: np.ndarray, r: int = 12) -> None:
+    """``img`` (the canvas's size) into ``canvas`` over ``band``, cross-faded ``r``
+    px either side of the band's edge (dev6 on the pod: each step's band met the
+    last in a thin straight line the full-resolution pass could not remove)."""
+    b = band.astype(np.uint8)
+    d_in = cv2.distanceTransform(b, cv2.DIST_L2, 5)
+    d_out = cv2.distanceTransform(1 - b, cv2.DIST_L2, 5)
+    w = np.clip(0.5 + (d_in - d_out) / (2 * r), 0, 1).astype(np.float32)
+    canvas[:] = (canvas.astype(np.float32) * (1 - w[..., None])
+                 + img.astype(np.float32) * w[..., None]).round().astype(np.uint8)
+
+
 def body_zone(seg: np.ndarray, rect, shape, add: dict, spread_deg: float = 12.0) -> np.ndarray:
     """Scene first: where the body may be painted over the laid-out scene -- a fan
     from where the frame cuts the subject, out across each grown side."""
@@ -194,7 +206,8 @@ def track_body(seg: np.ndarray, prev: np.ndarray) -> np.ndarray:
     canvas kept growing and grew more figures; a figure not joined to the body is
     not the body."""
     n, labels = cv2.connectedComponents(seg.astype(np.uint8), connectivity=8)
-    near = cv2.dilate(prev.astype(np.uint8), np.ones((9, 9), np.uint8)) > 0
+    # 25 px: the step's cross-fade leaves a half-blended strip at the join.
+    near = cv2.dilate(prev.astype(np.uint8), np.ones((25, 25), np.uint8)) > 0
     keep = np.unique(labels[near & seg])
     keep = keep[keep > 0]
     return np.isin(labels, keep)
@@ -315,7 +328,12 @@ def extend_side(src: np.ndarray, cut: list[str], grow: float, long_side: float, 
                 if out is None:
                     out = init                 # keep the pre-fill; the sphere views go on
                 big = cv2.resize(out, (cw, ch), interpolation=cv2.INTER_LANCZOS4)
-                _paste(canvas, region, big, m)
+                if scene_of is not None:
+                    _paste_across(canvas, big, zone)    # only the body, over the scene
+                elif k == 0:
+                    _paste(canvas, region, big, m)      # the scene pass crosses this one
+                else:
+                    _paste_across(canvas, big, band)
             body = track_body(segment(canvas), prev)
             reaches = body_reaches(body, side)
             passes.append({"side": side, "added": inc, "painted": painted,
