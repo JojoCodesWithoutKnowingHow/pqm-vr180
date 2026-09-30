@@ -71,7 +71,7 @@ def extend(src: np.ndarray, seg: np.ndarray, cut: list[str], long_side: float, W
            reference: np.ndarray | None = None, steps: int | None = None,
            grow_frac: float = 1.0, max_side_deg: float = 70.0, budget: int = 1280 * 1024,
            refine_denoise: float = 0.5, work=None, paint: bool = True, segment=None,
-           framing=(), adetail: float = 0.0, align_px: int = 0):
+           framing=(), adetail: float = 0.0, redraw_denoise: float = 0.0):
     """(grown picture as ``grow.Grown``, updated fisheye, log), or None when nothing
     is cut. ``fish`` is the layout's (hires) fisheye, ``max_deg`` its reach.
     ``paint=False`` (round 7): the layout was generated with her region already, so
@@ -107,7 +107,7 @@ def extend(src: np.ndarray, seg: np.ndarray, cut: list[str], long_side: float, W
         limit = cv2.dilate(wide.astype(np.uint8), np.ones((65, 65), np.uint8)) > 0
         return _flat(src, fish, W, max_deg, f, Wc, Hc, x0, y0, cx, cy, zone, inpaint, her, seed,
                      steps, refine_denoise, work, cut, add, (top, left, side), g, "regional",
-                     segment, adetail, limit, align_px, seg)
+                     segment, adetail, limit, redraw_denoise, reference)
     ys, xs = np.nonzero(zf | sf)
     # A crop holding her and the fan, with a third again of room around them.
     y_a, y_b, x_a, x_b = ys.min(), ys.max() + 1, xs.min(), xs.max() + 1
@@ -135,77 +135,64 @@ def extend(src: np.ndarray, seg: np.ndarray, cut: list[str], long_side: float, W
                  steps, refine_denoise, work, cut, add, (top, left, side), g, "in-layout")
 
 
-def _runs(row: np.ndarray, min_px: int = 8) -> list[tuple[int, int]]:
-    """``[(start, end), ...]`` of the True runs in a bool row, ``min_px`` or longer."""
-    d = np.diff(np.concatenate([[0], row.astype(np.int8), [0]]))
-    starts, ends = np.flatnonzero(d == 1), np.flatnonzero(d == -1)
-    return [(int(s_), int(e_)) for s_, e_ in zip(starts, ends) if e_ - s_ >= min_px]
-
-
-_ROT = {"bottom": 0, "top": 2, "left": 1, "right": 3}
-
-
-def align(canvas: np.ndarray, rect, sides, src_seg: np.ndarray, segment,
-          falloff: int = 300, probe: int = 16, margin: int = 150) -> dict:
-    """Round 25 (the author: the legs do not align, and the gap is too large to
-    bridge): the layout draws her continuation at a fraction of the source's
-    resolution, so a shin meets the source's ~30 px off at the frame's edge. For
-    each cut edge, her body's runs along the source's last row are matched to the
-    layout's runs ``probe`` px outside, and the layout is shifted sideways so each
-    run's ends meet the source's, the shift fading to nothing ``falloff`` px out
-    and ``margin`` px beside the outermost run. Geometry only -- nothing is
-    generated. In place; a log."""
+def redraw(canvas: np.ndarray, rect, sides, segment, inpaint, prompt: str, negative: str,
+           seed: int, denoise: float, limit: np.ndarray | None = None,
+           steps: int | None = None, reference: np.ndarray | None = None,
+           budget: int = 1280 * 1280, spread: int = 24, inner: int = 32) -> dict:
+    """Round 26 (the author: the gap is too large to bridge or warp; redraw it with
+    enough context). The layout draws her continuation where one fisheye pixel
+    covers ~6-10 canvas pixels, so a shin meets the source's ~30 px off. Her whole
+    figure -- the source's part and the layout's continuation, within ``limit`` --
+    is cropped with room around it and generated at up to ``budget`` px (about
+    half the source's resolution, not the layout's eighth), repainting at
+    ``denoise`` from the layout's own pixels (no hole: the layout's pose and feet
+    stay) her body outside the source, grown ``spread`` px so a limb can move,
+    and ``inner`` px into the source along each cut edge where she crosses it.
+    Pasted with the zero-at-the-edge ramp; the caller restores the source. In
+    place; a log."""
     x0, y0, w, h = rect
-    Hc, Wc = canvas.shape[:2]
-    rectm = np.zeros((Hc, Wc), bool)
+    H, W = canvas.shape[:2]
+    seg = segment(canvas)
+    rectm = np.zeros((H, W), bool)
     rectm[y0:y0 + h, x0:x0 + w] = True
-    srcm = np.zeros((Hc, Wc), bool)
-    srcm[y0:y0 + h, x0:x0 + w] = src_seg
-    out = {}
+    person = grow.track_body(seg, seg & rectm)
+    if limit is not None:
+        person &= limit
+    outside = person & ~rectm
+    if outside.sum() < 64:
+        return {"skipped": "no body outside the source"}
+    k = 2 * spread + 1
+    mask = cv2.dilate(outside.astype(np.uint8), np.ones((k, k), np.uint8)) > 0
+    near = cv2.dilate(person.astype(np.uint8), np.ones((k, k), np.uint8)) > 0
+    strip = np.zeros((H, W), bool)
     for side in sides:
-        k = _ROT[side]
-        cv_r = np.ascontiguousarray(np.rot90(canvas, k))
-        rm, sm = np.rot90(rectm, k), np.rot90(srcm, k)
-        body = np.rot90(segment(canvas), k)
-        H, W = rm.shape
-        ys, xs = np.nonzero(rm)
-        ye, xa, xb = ys.max() + 1, xs.min(), xs.max() + 1
-        if ye + probe >= H:
-            continue
-        src_runs = [(s_ + xa, e_ + xa) for s_, e_ in _runs(sm[ye - 1, xa:xb])]
-        lay_runs = _runs(body[ye + probe])
-        pts = []
-        for a_, b_ in src_runs:
-            # The layout's run overlapping this one most, or the nearest within
-            # its width.
-            best = None
-            for c_, d_ in lay_runs:
-                ov = min(b_, d_) - max(a_, c_)
-                dist = abs((a_ + b_) / 2 - (c_ + d_) / 2)
-                if ov > 0 or dist < (b_ - a_):
-                    score = ov if ov > 0 else -dist
-                    if best is None or score > best[0]:
-                        best = (score, c_, d_)
-            if best is not None:
-                pts += [(a_, a_ - best[1]), (b_, b_ - best[2])]
-        if not pts:
-            out[side] = {"matched": 0}
-            continue
-        pts.sort()
-        px = [pts[0][0] - margin] + [p_[0] for p_ in pts] + [pts[-1][0] + margin]
-        pv = [0.0] + [float(p_[1]) for p_ in pts] + [0.0]
-        g = np.interp(np.arange(W), px, pv).astype(np.float32)
-        n = min(falloff, H - ye)
-        t = np.linspace(1.0, 0.0, n, endpoint=False, dtype=np.float32)
-        t = t * t * (3 - 2 * t)                       # smoothstep
-        map_x = (np.arange(W, dtype=np.float32)[None, :] - g[None, :] * t[:, None])
-        map_y = np.repeat(np.arange(ye, ye + n, dtype=np.float32)[:, None], W, 1)
-        warped = cv2.remap(cv_r, map_x, map_y, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
-        cv_r[ye:ye + n] = warped
-        canvas[:] = np.rot90(cv_r, -k)
-        out[side] = {"matched": len(pts) // 2,
-                     "shift_px": [round(v, 1) for v in pv[1:-1]]}
-    return out
+        if side == "bottom":
+            strip[max(y0, y0 + h - inner):y0 + h, x0:x0 + w] = True
+        elif side == "top":
+            strip[y0:y0 + inner, x0:x0 + w] = True
+        elif side == "left":
+            strip[y0:y0 + h, x0:x0 + inner] = True
+        elif side == "right":
+            strip[y0:y0 + h, max(x0, x0 + w - inner):x0 + w] = True
+    mask = (mask & ~rectm) | (strip & near)
+    ys, xs = np.nonzero(person)
+    pad_y = int((ys.max() - ys.min()) * 0.2) + 64
+    pad_x = int((xs.max() - xs.min()) * 0.2) + 64
+    t, b = max(0, ys.min() - pad_y), min(H, ys.max() + 1 + pad_y)
+    l, r = max(0, xs.min() - pad_x), min(W, xs.max() + 1 + pad_x)
+    region = (slice(t, b), slice(l, r))
+    m = mask[region]
+    ch, cw = m.shape
+    gw, gh = grow._gen_size(ch, cw, budget)
+    small = cv2.resize(canvas[region], (gw, gh), interpolation=cv2.INTER_AREA)
+    sm = cv2.resize(m.astype(np.uint8), (gw, gh), interpolation=cv2.INTER_NEAREST)
+    out = inpaint(small, sm * 255, prompt, negative, seed, steps=steps, denoise=denoise,
+                  touch_up=True, reference=reference)
+    big = cv2.resize(out, (cw, ch), interpolation=cv2.INTER_LANCZOS4)
+    grow._paste(canvas, region, big, m)
+    return {"box": [int(l), int(t), int(r), int(b)], "generated_at": [gw, gh],
+            "scale": round(gw / cw, 3), "denoise": denoise,
+            "masked_px": int(m.sum())}
 
 
 def adetail(canvas: np.ndarray, rect, segment, inpaint, prompt: str, negative: str, seed: int,
@@ -251,7 +238,7 @@ def adetail(canvas: np.ndarray, rect, segment, inpaint, prompt: str, negative: s
 
 def _flat(src, fish, W, max_deg, f, Wc, Hc, x0, y0, cx, cy, zone, inpaint, her, seed, steps,
           refine_denoise, work, cut, add, crop, g, order, segment=None, adetail_denoise=0.0,
-          adetail_limit=None, align_px=0, src_seg=None):
+          adetail_limit=None, redraw_denoise=0.0, reference=None):
     """The grown flat canvas out of the (updated) fisheye; the fan refined there at
     the source's resolution."""
     h, w = src.shape[:2]
@@ -259,9 +246,11 @@ def _flat(src, fish, W, max_deg, f, Wc, Hc, x0, y0, cx, cy, zone, inpaint, her, 
     lay_eq, cover = layout.from_fisheye(fish, W, max_deg)
     canvas = sphere.flat_of(lay_eq, Wc, Hc, f, cx, cy)
     canvas[y0:y0 + h, x0:x0 + w] = src
-    ad_log = al_log = None
-    if align_px > 0 and segment is not None and src_seg is not None:
-        al_log = align(canvas, (x0, y0, w, h), list(add), src_seg, segment, falloff=align_px)
+    ad_log = rd_log = None
+    if redraw_denoise > 0 and segment is not None:
+        rd_log = redraw(canvas, (x0, y0, w, h), list(add), segment, inpaint, her,
+                        prompts.SUBJECT_NEGATIVE, seed + 800, redraw_denoise,
+                        limit=adetail_limit, steps=steps, reference=reference)
     if adetail_denoise > 0 and segment is not None:
         ad_log = adetail(canvas, (x0, y0, w, h), segment, inpaint, her, prompts.SUBJECT_NEGATIVE,
                          seed + 900, adetail_denoise, steps=steps, limit=adetail_limit)
@@ -292,6 +281,6 @@ def _flat(src, fish, W, max_deg, f, Wc, Hc, x0, y0, cx, cy, zone, inpaint, her, 
                        {"cut": cut, "added": add, "canvas": [Wc, Hc], "order": order,
                         "fisheye_crop": list(crop), "generated_at": g,
                         "refine_tiles": tiles, "refine_denoise": refine_denoise,
-                        "adetail": ad_log, "align": al_log, "prompt": her})
+                        "adetail": ad_log, "redraw": rd_log, "prompt": her})
     g_out.body = None
     return g_out, fish, g_out.log

@@ -161,11 +161,12 @@ def parse(argv=None):
                    help="the source's pose and framing words (e.g. 'sitting, crossed legs, "
                         "cowboy shot'); with --extend-regional they go into her region's prompt "
                         "so it knows where her body ends (round 7)")
-    p.add_argument("--align", type=int, default=0, metavar="PX",
-                   help="round 25, with --extend-in-layout: before ADetailer, shift the "
-                        "layout sideways so her body meets the source's at each cut edge, "
-                        "fading out over PX px (r19: a shin met the source's ~30 px off; r24: "
-                        "regenerating the join drew a second head)")
+    p.add_argument("--redraw", type=float, default=0.0, metavar="D",
+                   help="round 26, with --extend-in-layout: before ADetailer, redraw her body "
+                        "outside the source (and 32 px into it at each cut edge) at D from the "
+                        "layout's pixels, in a crop of her whole figure at about half the "
+                        "source's resolution (r19: a shin met the source's ~30 px off; r24-25: "
+                        "a regenerated band and a sideways warp both failed)")
     p.add_argument("--auto-pipeline", action="store_true",
                    help="round 23 (the author's pick): grow her body stepwise first (J's "
                         "extension); if her body still reaches a grown edge after any step, "
@@ -409,7 +410,7 @@ def main(argv=None) -> int:
                               refine_denoise=a.extend_refine or 0.5, work=work,
                               paint=region is None and full_p is None, segment=segment,
                               framing=prompts.pose_words(a.subject_framing),
-                              adetail=a.adetail, align_px=a.align)
+                              adetail=a.adetail, redraw_denoise=a.redraw)
         if res is not None:
             g, fish, extra_log["extend_in_layout"] = res
             img_, cover_ = layout.from_fisheye(fish, W, a.layout_deg)

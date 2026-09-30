@@ -734,7 +734,7 @@ def test_cli_auto_pipeline_picks_l_when_her_body_runs_out_of_frame(tmp_path, mon
                    "--pano-only", "--join", "hard", "--auto-pipeline", "--extend-side", "0.6",
                    "--extend-refine", "0.35", "--layout", "fisheye", "--layout-px", "256",
                    "--layout-hires", "512", "--compose", "0", "--seam-repaint", "0.4",
-                   "--soften-rim", "0", "--adetail", "0.27", "--align", "200"])
+                   "--soften-rim", "0", "--adetail", "0.27", "--redraw", "0.6"])
     assert rc == 0
     assert len(calls) == 1                                   # the extension made once
     log = json.loads((tmp_path / "o_180_LR.work" / "log.json").read_text(encoding="utf-8"))
@@ -748,56 +748,41 @@ def test_cli_auto_pipeline_picks_l_when_her_body_runs_out_of_frame(tmp_path, mon
 
 
 
-def _leg_canvas(side):
-    # A leg (a white bar) in the source, and the layout's continuation 30 px off.
+
+def test_redraw_repaints_her_body_outside_the_source_with_her_whole_figure_in_view():
+    # Round 26: her figure in one crop, her body outside the source (grown) and a
+    # strip into it at the cut edge repainted from the layout's pixels.
+    from vr180 import inlayout
     H, W = 1400, 1200
-    canvas = np.full((H, W, 3), 60, np.uint8)
+    canvas = np.full((H, W, 3), 90, np.uint8)
     rect = (200, 0, 800, 900)
-    canvas[0:900, 500:560] = 255                       # the source's shin
-    canvas[900:, 530:590] = 255                        # the layout's, 30 px right
-    src_seg = np.zeros((900, 800), bool)
-    src_seg[:, 300:360] = True
-    return canvas, rect, src_seg
+    person = np.zeros((H, W), bool)
+    person[200:900, 400:700] = True                    # her, in the source
+    person[900:1300, 500:560] = True                   # a leg the layout drew
+    fake = ColourForge()
+    log = inlayout.redraw(canvas, rect, ["bottom"], lambda rgb, threshold=0.5: person, fake,
+                          "1girl", "", seed=1, denoise=0.6)
+    assert len(fake.calls) == 1
+    c = fake.calls[0]
+    assert c["touch_up"] and c["denoise"] == 0.6 and not c["control"]
+    t, b = log["box"][1], log["box"][3]
+    assert t <= 200 and b >= 1300                      # her whole figure in the crop
+    changed = np.abs(canvas.astype(int) - 90).max(-1) > 0
+    assert changed[950:1250, 510:550].all()            # the leg
+    assert changed[950:1250, 480:500].any()            # grown so it can move
+    assert changed[880:895, 510:550].any()             # into the source at the edge
+    assert not changed[300:850].any()                  # the rest of the source untouched
+    # the strip follows her body where it crosses the edge (400-700, grown 24 px)
+    assert not changed[:, :370].any() and not changed[:, 730:].any()
 
 
-def test_align_moves_the_layouts_leg_onto_the_sources_and_fades_out():
-    # Round 25: geometry only; the leg meets the source's at the edge.
+def test_redraw_skips_without_a_body_outside_the_source():
     from vr180 import inlayout
-    canvas, rect, src_seg = _leg_canvas("bottom")
-    before = canvas.copy()
-    log = inlayout.align(canvas, rect, ["bottom"], src_seg,
-                         lambda rgb, threshold=0.5: rgb[..., 0] > 200, falloff=300)
-    assert log["bottom"]["matched"] == 1 and log["bottom"]["shift_px"] == [-30.0, -30.0]
-    row = np.flatnonzero(canvas[902, :, 0] > 200)
-    assert abs(row.min() - 500) <= 2 and abs(row.max() - 559) <= 2      # meets the source
-    far = np.flatnonzero(canvas[1250, :, 0] > 200)
-    assert far.min() == 530 and far.max() == 589                          # untouched past falloff
-    assert (canvas[:900] == before[:900]).all()                           # the source untouched
-    mid = np.flatnonzero(canvas[1050, :, 0] > 200)
-    assert 500 < mid.min() < 530                                          # eased between
-
-
-def test_align_leaves_an_unmatched_edge_alone():
-    from vr180 import inlayout
-    canvas, rect, src_seg = _leg_canvas("bottom")
-    canvas[900:, 530:590] = 60                          # the layout drew no leg
-    before = canvas.copy()
-    log = inlayout.align(canvas, rect, ["bottom"], src_seg,
-                         lambda rgb, threshold=0.5: rgb[..., 0] > 200)
-    assert log["bottom"]["matched"] == 0 and (canvas == before).all()
-
-
-def test_align_works_on_a_side_edge():
-    from vr180 import inlayout
-    canvas, rect, src_seg = _leg_canvas("bottom")
-    c2 = np.ascontiguousarray(np.rot90(canvas, -1))     # the leg now leaves on the left
-    H, W = c2.shape[:2]
-    # rect (x, y, w, h) rotated clockwise: the source's bottom edge is now its left edge.
-    x0, y0, w, h = rect
-    r2 = (W - (y0 + h), x0, h, w)
-    s2 = np.ascontiguousarray(np.rot90(src_seg, -1))
-    log = inlayout.align(c2, r2, ["left"], s2, lambda rgb, threshold=0.5: rgb[..., 0] > 200)
-    assert log["left"]["matched"] == 1
-    back = np.rot90(c2, 1)
-    row = np.flatnonzero(back[902, :, 0] > 200)
-    assert abs(row.min() - 500) <= 2 and abs(row.max() - 559) <= 2
+    canvas = np.full((1000, 1000, 3), 90, np.uint8)
+    person = np.zeros((1000, 1000), bool)
+    person[100:500, 100:300] = True
+    fake = ColourForge()
+    log = inlayout.redraw(canvas, (0, 0, 600, 600), ["bottom"],
+                          lambda rgb, threshold=0.5: person, fake, "1girl", "", seed=1,
+                          denoise=0.6)
+    assert fake.calls == [] and "skipped" in log
