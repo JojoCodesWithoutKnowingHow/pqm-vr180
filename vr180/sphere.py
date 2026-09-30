@@ -52,18 +52,50 @@ def place(src: np.ndarray, W: int, long_side_deg: float):
     """
     h, w = src.shape[:2]
     hfov, vfov = fovs(w, h, long_side_deg)
+    pano, mask = place_focal(src, W, focal_px(w, h, long_side_deg), w / 2, h / 2)
+    return pano, mask, (hfov, vfov)
+
+
+def focal_px(w: int, h: int, long_side_deg: float) -> float:
+    """The focal length, in pixels, of a w x h picture whose long side spans
+    ``long_side_deg`` about its centre."""
+    return (max(w, h) / 2) / math.tan(math.radians(long_side_deg) / 2)
+
+
+def place_focal(img: np.ndarray, W: int, f: float, cx: float, cy: float):
+    """A flat picture with focal length ``f`` pixels whose optical centre is at
+    pixel (``cx``, ``cy``), straight ahead, as a W-wide equirect: (pano, mask).
+    ``place`` is the centred case; a canvas grown on one side (``flatext``) keeps
+    its source's centre and so is off-centre. ``mask`` is eroded as in ``place``."""
+    h, w = img.shape[:2]
     d = equirect_dirs(W)
     z = np.maximum(d[..., 2], 1e-6)
-    px = d[..., 0] / z / math.tan(math.radians(hfov) / 2)
-    py = d[..., 1] / z / math.tan(math.radians(vfov) / 2)
-    inside = (d[..., 2] > 0) & (np.abs(px) <= 1) & (np.abs(py) <= 1)
-    mx = ((px + 1) / 2 * w - 0.5).astype(np.float32)
-    my = ((1 - py) / 2 * h - 0.5).astype(np.float32)
-    pano = cv2.remap(src, mx, my, cv2.INTER_AREA if w > W else cv2.INTER_CUBIC,
+    u = cx + f * d[..., 0] / z
+    v = cy - f * d[..., 1] / z
+    inside = (d[..., 2] > 0) & (u >= 0) & (u <= w) & (v >= 0) & (v <= h)
+    pano = cv2.remap(img, (u - 0.5).astype(np.float32), (v - 0.5).astype(np.float32),
+                     cv2.INTER_AREA if w > W else cv2.INTER_CUBIC,
                      borderMode=cv2.BORDER_REPLICATE)
     pano[~inside] = 0
     mask = cv2.erode((inside * 255).astype(np.uint8), np.ones((5, 5), np.uint8))
-    return pano, mask, (hfov, vfov)
+    return pano, mask
+
+
+def flat_of(pano: np.ndarray, w: int, h: int, f: float, cx: float, cy: float,
+            interp: int = cv2.INTER_LINEAR) -> np.ndarray:
+    """The inverse of ``place_focal``: a w x h flat picture (focal ``f``, optical
+    centre (cx, cy)) sampled out of an equirect -- scene first puts the laid-out
+    scene into the grown canvas this way."""
+    H, W = pano.shape[:2]
+    u, v = np.meshgrid(np.arange(w, dtype=np.float32) + 0.5, np.arange(h, dtype=np.float32) + 0.5)
+    x, y = (u - cx) / f, -(v - cy) / f
+    n = np.sqrt(x * x + y * y + 1)
+    lon = np.arctan2(x / n, 1 / n)
+    lat = np.arcsin(np.clip(y / n, -1, 1))
+    mx = ((lon + np.pi) / (2 * np.pi) * W - 0.5) % W
+    my = np.clip((np.pi / 2 - lat) / np.pi * H - 0.5, 0, H - 1)
+    return cv2.remap(pano, mx.astype(np.float32), my.astype(np.float32), interp,
+                     borderMode=cv2.BORDER_WRAP)
 
 
 def rotation(yaw_deg: float, pitch_deg: float) -> np.ndarray:

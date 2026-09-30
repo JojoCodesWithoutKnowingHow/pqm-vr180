@@ -126,12 +126,15 @@ class Forge:
     def inpaint(self, image: np.ndarray, mask: np.ndarray, prompt: str, negative: str,
                 seed: int, s: Settings, control: np.ndarray | None = None,
                 reference: np.ndarray | None = None, steps: int | None = None,
-                denoise: float | None = None) -> np.ndarray:
+                denoise: float | None = None, touch_up: bool = False) -> np.ndarray:
         """``mask`` is uint8, 255 where to paint. ``control`` is the inpaint
         ControlNet's image (``noob``: the view with the hole pure black);
         ``reference`` the IP-Adapter's. ``denoise`` overrides the settings' for
-        one call (a view refined over a layout). Returns an image the size of
-        ``image``. Raises ``ForgeError`` when the fill comes back black (NaN latents)."""
+        one call (a view refined over a layout). ``touch_up`` (round 2: the
+        extension's full-resolution pass, the seam repaint) is a low-denoise pass
+        over pixels already there, so it sends no inpaint ControlNet: that one
+        exists to fill a black hole. Returns an image the size of ``image``.
+        Raises ``ForgeError`` when the fill comes back black (NaN latents)."""
         h, w = image.shape[:2]
         payload = {
             "init_images": [b64png(image)], "mask": b64png(mask),
@@ -146,7 +149,9 @@ class Forge:
             "send_images": True, "save_images": False,
         }
         units = []
-        if s.method == "cn":
+        if touch_up:
+            pass
+        elif s.method == "cn":
             units.append({"enabled": True, "module": CN_MODULE, "model": s.cn_model,
                           "type_filter": CN_TYPE, "weight": s.cn_weight, "guidance_start": 0.0,
                           "guidance_end": s.cn_end, "control_mode": "Balanced",

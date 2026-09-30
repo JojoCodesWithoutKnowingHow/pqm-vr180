@@ -313,16 +313,24 @@ def fill_back(pano: np.ndarray, known: np.ndarray) -> np.ndarray:
 def widen(src: np.ndarray, fill_tags: list[str], inpaint: Inpainter, opt: Options,
           work: Path | None = None, say: Callable[[str], None] = print,
           segment: Segment | None = None, grow_segment: Segment | None = None,
-          layout: np.ndarray | None = None) -> Result:
+          layout: np.ndarray | None = None,
+          place: Callable[[np.ndarray], tuple] | None = None) -> Result:
     """``layout`` (S2): an equirect the size of the panorama whose front is a
     coarse fill of the whole scene from one generation (``vr180.layout``). Given,
     each scene view starts from it instead of a blur and changes it only by
     ``opt.layout_denoise``, so the views agree on where the room's walls, bed and
-    horizon are. A body's continuation zone still starts from the blur."""
+    horizon are. A body's continuation zone still starts from the blur.
+
+    ``place(img) -> (pano, mask, (hfov, vfov))`` puts a picture the size of ``src``
+    on the sphere; by default centred at ``opt.long_side``. A canvas grown on one
+    side (round 2) is off-centre and brings its own."""
     t_all = time.time()
     hard = opt.join == "hard"
     grow = grow_segment if (hard and grow_segment is not None) else segment
-    pano, src_mask, (hfov, vfov) = sphere.place(src, opt.width, opt.long_side)
+    if place is None:
+        def place(img):
+            return sphere.place(img, opt.width, opt.long_side)
+    pano, src_mask, (hfov, vfov) = place(src)
     source = src_mask > 0
     known = source.copy()
     where, why = prompts.setting(fill_tags)
@@ -336,7 +344,7 @@ def widen(src: np.ndarray, fill_tags: list[str], inpaint: Inpainter, opt: Option
     deferred = np.zeros(source.shape, bool)   # plain background, filled after the loop
     if segment is not None and opt.subject_tags:
         seg = segment(src)
-        placed, _m, _f = sphere.place((seg * 255).astype(np.uint8), opt.width, opt.long_side)
+        placed, _m, _f = place((seg * 255).astype(np.uint8))
         subj = (placed > 127) & source
         cut = _cut_edges(seg)
         log["subject"] = {"frac_of_source": round(float(seg.mean()), 3), "cut_at": cut}

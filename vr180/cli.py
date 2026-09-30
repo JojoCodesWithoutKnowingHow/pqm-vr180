@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 import time
 from pathlib import Path
@@ -18,7 +19,8 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from . import __version__, flatext, forge, layout, placement, post, prompts, sphere, stereo, widen
+from . import (__version__, flatext, forge, grow, layout, placement, post, prompts, seam as seams,
+               sphere, stereo, widen)
 
 SEG_MODEL = "/workspace/models/anime-seg/isnetis.onnx"
 DEPTH_MODELS = {"any-b": ["--depth-backend", "depth-anything"],
@@ -131,6 +133,25 @@ def parse(argv=None):
     p.add_argument("--layout-deg", type=float, default=100.0,
                    help="the layout fisheye reaches this far off straight ahead")
     p.add_argument("--layout-px", type=int, default=1024)
+    p.add_argument("--layout-strong", action="store_true",
+                   help="weight the layout's fisheye words (round 1: one layout came back as "
+                        "an ordinary wide-angle picture)")
+    # Round 2 (the author's round-1 verdicts): off by default until judged.
+    p.add_argument("--extend-side", type=float, default=0.0, metavar="G",
+                   help="grow only the side(s) the frame cuts the body, each by G times the "
+                        "source's size across it, keeping its optical centre (0: off). Round 1's "
+                        "symmetric --flat-extend gave a cut side only +25%%")
+    p.add_argument("--extend-max-deg", type=float, default=70.0,
+                   help="the grown edge stays within this angle of straight ahead")
+    p.add_argument("--extend-refine", type=float, default=0.35,
+                   help="denoise of the full-resolution pass over the grown pixels and the "
+                        "source's outer 8 px (0: off)")
+    p.add_argument("--order", choices=("body-first", "scene-first"), default="body-first",
+                   help="scene-first (with --layout fisheye and --extend-side): lay the scene "
+                        "out, then paint the body over it in a fan from the cut edge")
+    p.add_argument("--seam-repaint", type=float, default=0.0, metavar="D",
+                   help="repaint a narrow band across the picture's edge on the sphere at this "
+                        "denoise (0: off). Use with --soften-rim 0")
     return p.parse_args(argv)
 
 
@@ -172,9 +193,9 @@ def main(argv=None) -> int:
         return 2
 
     def inpaint(image, mask, prompt, negative, seed, control=None, reference=None, steps=None,
-                denoise=None):
+                denoise=None, touch_up=False):
         return f.inpaint(image, mask, prompt, negative, seed, s, control=control,
-                         reference=reference, steps=steps, denoise=denoise)
+                         reference=reference, steps=steps, denoise=denoise, touch_up=touch_up)
 
     opt = widen.Options(width=a.width, target_deg=a.target,
                         max_new=a.max_new, seed=a.seed, quality=a.quality,
@@ -208,17 +229,64 @@ def main(argv=None) -> int:
     t0 = time.time()
     where = prompts.setting(tags)[0]
     ref = src if (a.reference and a.method == "noob") else None
+    opt.long_side = long_side
     extra_log = {}
-    picture, picture_long = src, long_side
-    orig_mask = None
-    if a.flat_extend > 0 and segment is not None and subject_tags:
-        cut = widen._cut_edges(segment(src))
+    W = a.width
+
+    def centred(img):
+        return sphere.place(img, W, long_side)
+
+    picture, place, orig_mask, lay = src, centred, None, None
+    seg_src = segment(src) if (segment is not None and subject_tags) else None
+    cut = widen._cut_edges(seg_src) if seg_src is not None else []
+    lay_kw = dict(max_deg=a.layout_deg, S=a.layout_px, quality=a.quality, reference=ref,
+                  steps=a.steps, work=work, strong=a.layout_strong)
+    if a.extend_side > 0 and seg_src is not None:
+        scene = None
+        if a.order == "scene-first" and a.layout == "fisheye":
+            # The author's order: the scene first, then the body painted over it.
+            pano0, m0, _f = centred(src)
+            lay, extra_log["layout"] = layout.make_layout(pano0, m0 > 0, tags, where, inpaint,
+                                                          a.seed + 7000, **lay_kw)
+            f0 = grow.focal(w, h, long_side)
+            add = grow.side_growth(w, h, cut, a.extend_side, f0, a.extend_max_deg)
+            if add:
+                cw, ch, x0, y0 = grow.canvas_geometry(w, h, add)
+                scene = sphere.flat_of(lay, cw, ch, f0, x0 + w / 2, y0 + h / 2)
+        g = grow.extend_side(src, cut, a.extend_side, long_side, inpaint, subject_tags, tags,
+                             where, a.seed + 5000, quality=a.quality, reference=ref,
+                             steps=a.steps, max_deg=a.extend_max_deg,
+                             refine_denoise=a.extend_refine, scene=scene, seg=seg_src)
+        if g is not None:
+            picture = g.image
+
+            def place(img, g=g):
+                pano_, mask_ = sphere.place_focal(img, W, g.focal, *g.centre)
+                ih, iw = img.shape[:2]
+                cx, cy = g.centre
+                fov = (math.degrees(math.atan(cx / g.focal) + math.atan((iw - cx) / g.focal)),
+                       math.degrees(math.atan(cy / g.focal) + math.atan((ih - cy) / g.focal)))
+                return pano_, mask_, fov
+
+            placed, pm = sphere.place_focal(g.source_mask(), W, g.focal, *g.centre)
+            orig_mask = ((placed > 127) & (pm > 0)).astype(np.uint8) * 255
+            Image.fromarray(picture).save(work / "flat_extended.png")
+            extra_log["extend_side"] = g.log
+            print("extend side: cut at %s, added %s, canvas %s, %s"
+                  % (", ".join(cut), g.log["added"], g.log["canvas"], g.log["order"]))
+        else:
+            extra_log["extend_side"] = {"skipped": "the frame cuts no subject", "cut": cut}
+    elif a.flat_extend > 0 and seg_src is not None:
         ext = flatext.extend(src, cut, a.flat_extend, inpaint, subject_tags, tags, where,
                              a.seed + 5000, quality=a.quality, reference=ref, steps=a.steps)
         if ext is not None:
             picture = ext.image
             picture_long = flatext.ext_long_side(w, h, long_side, *ext.image.shape[1::-1])
-            placed, _m, _f = sphere.place(ext.source_mask(), a.width, picture_long)
+
+            def place(img, lng=picture_long):
+                return sphere.place(img, W, lng)
+
+            placed, _m, _f = place(ext.source_mask())
             orig_mask = ((placed > 127) & (_m > 0)).astype(np.uint8) * 255
             Image.fromarray(picture).save(work / "flat_extended.png")
             extra_log["flat_extend"] = dict(ext.log, long_side=round(picture_long, 2))
@@ -226,20 +294,29 @@ def main(argv=None) -> int:
                   % (", ".join(cut), ext.log["canvas"], picture_long))
         else:
             extra_log["flat_extend"] = {"skipped": "the frame cuts no subject"}
-    opt.long_side = picture_long
+    elif a.flat_extend > 0 or a.extend_side > 0:
+        extra_log["extend"] = {"skipped": "no subject tags or no segmenter"}
+    if a.layout == "fisheye" and lay is None:
+        pano0, m0, _f = place(picture)
+        lay, extra_log["layout"] = layout.make_layout(pano0, m0 > 0, tags, where, inpaint,
+                                                      a.seed + 7000, **lay_kw)
     grow_segment = None
     if segment is not None:
         grow_segment = lambda img: segment(img, threshold=a.grow_threshold)  # noqa: E731
-    lay = None
-    if a.layout == "fisheye":
-        pano0, m0, _f = sphere.place(picture, a.width, picture_long)
-        lay, extra_log["layout"] = layout.make_layout(
-            pano0, m0 > 0, tags, where, inpaint, a.seed + 7000, max_deg=a.layout_deg,
-            S=a.layout_px, quality=a.quality, reference=ref, steps=a.steps, work=work)
     r = widen.widen(picture, tags, inpaint, opt, work, segment=segment,
-                    grow_segment=grow_segment, layout=lay)
+                    grow_segment=grow_segment, layout=lay, place=place)
     src_mask = orig_mask if orig_mask is not None else r.source_mask
-    seam = {"ratio_before": round(post.detail_ratio(r.pano, src_mask > 0), 3)}
+    seam = {}
+    if a.seam_repaint > 0:
+        if subject_tags:
+            sp = prompts.subject_prompt(list(subject_tags), tags, where, 0.0, a.quality)
+            sn = prompts.SUBJECT_NEGATIVE
+        else:
+            sp = prompts.view_prompt(tags, where, 0.0, a.quality)
+            sn = prompts.view_negative(a.negative, where, 0.0)
+        seam["repaint"] = seams.repaint(r.pano, r.source_mask > 0, inpaint, sp, sn,
+                                        a.seed + 9000, denoise=a.seam_repaint, steps=a.steps)
+    seam["ratio_before"] = round(post.detail_ratio(r.pano, src_mask > 0), 3)
     if a.detail_match:
         r.pano, seam["detail_amount"] = post.detail_match(r.pano, src_mask > 0)
     if a.soften_rim:

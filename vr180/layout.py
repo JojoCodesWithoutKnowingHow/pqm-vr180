@@ -59,10 +59,16 @@ def from_fisheye(fish: np.ndarray, W: int, max_deg: float) -> tuple[np.ndarray, 
     return img, th <= math.radians(max_deg)
 
 
-def layout_prompt(fill_tags: list[str], where: str | None, quality: str = prompts.QUALITY) -> str:
+def layout_prompt(fill_tags: list[str], where: str | None, quality: str = prompts.QUALITY,
+                  strong: bool = False) -> str:
     """The whole scene at once: every tag, no direction words (up and down are both
-    in the picture), and the projection named."""
-    extra = ["fisheye", "wide shot", "no humans"] + ([] if where == "plain" else ["scenery"])
+    in the picture), and the projection named. ``strong`` (round 2): weighted, with
+    ``fisheye lens`` and ``curved lines``, since round 1's Yamato layout came back as
+    an ordinary wide-angle picture and bent the room when read as a fisheye. (An
+    automatic straight-line check was tried on round 1's twenty layouts and could not
+    tell that one from a true fisheye, so it is not used.)"""
+    lens = ["(fisheye:1.3)", "fisheye lens", "curved lines"] if strong else ["fisheye"]
+    extra = lens + ["wide shot", "no humans"] + ([] if where == "plain" else ["scenery"])
     words = list(dict.fromkeys(extra + list(fill_tags)))
     return ", ".join(([quality] if quality else []) + words)
 
@@ -71,7 +77,7 @@ def make_layout(pano: np.ndarray, known: np.ndarray, fill_tags: list[str], where
                 inpaint, seed: int, max_deg: float = 100.0, S: int = 1024,
                 quality: str = prompts.QUALITY, negative: str = prompts.NEGATIVE,
                 reference: np.ndarray | None = None, steps: int | None = None,
-                work=None) -> tuple[np.ndarray, dict]:
+                work=None, strong: bool = False) -> tuple[np.ndarray, dict]:
     """(layout equirect the size of ``pano``, log). Outside the fisheye's disc the
     layout is the disc's edge carried outward and blurred, so a view there still
     starts from something of the scene's colour."""
@@ -84,7 +90,7 @@ def make_layout(pano: np.ndarray, known: np.ndarray, fill_tags: list[str], where
     seeded = widen._seed(fish, mask > 0)
     control = seeded.copy()
     control[mask > 0] = 0
-    prompt = layout_prompt(fill_tags, where, quality)
+    prompt = layout_prompt(fill_tags, where, quality, strong=strong)
     gen = inpaint(seeded, mask, prompt, negative, seed, control=control, reference=reference,
                   steps=steps)
     img, cover = from_fisheye(gen, W, max_deg)
