@@ -569,3 +569,88 @@ def test_cli_layout_full_prompt_then_adetail_no_extension(tmp_path, monkeypatch)
     assert "extend_side" not in log                         # no extension step
     first = fake.calls[0]
     assert first["her"] and first["control"] and not first["touch_up"]   # the layout itself
+
+
+def test_her_region_reach_widens_her_region():
+    # Round 21: a wider reach (3 crossing widths) for the layout's her region.
+    from vr180 import inlayout
+    src = checker(416, 608)
+    seg = np.zeros(src.shape[:2], bool)
+    seg[304:, 166:250] = True
+    narrow = inlayout.her_on_fisheye(src, seg, ["bottom"], 60.0, 1024, 256, 100.0, grow_frac=1.0)
+    wide = inlayout.her_on_fisheye(src, seg, ["bottom"], 60.0, 1024, 256, 100.0, grow_frac=1.0,
+                                   reach=3.0)
+    assert (narrow & ~wide).sum() == 0 and wide.sum() > narrow.sum() * 1.2
+
+
+def test_adetail_stays_inside_its_limit():
+    # Round 18: a giant second Yamato the layout drew touched her, and the pass took
+    # the whole canvas; outside ``limit`` nothing is repainted.
+    from vr180 import inlayout
+    H, W = 900, 700
+    canvas = np.full((H, W, 3), 90, np.uint8)
+    person = np.zeros((H, W), bool)
+    person[300:800, 250:350] = True                   # her body, out of the source
+    person[750:900, 0:700] = True                     # a giant joined to it
+    limit = np.zeros((H, W), bool)
+    limit[:700] = True
+    fake = ColourForge()
+    log = inlayout.adetail(canvas, (100, 100, 400, 500), lambda rgb, threshold=0.5: person, fake,
+                           "1girl", "", seed=1, denoise=0.2, limit=limit)
+    changed = np.abs(canvas.astype(int) - 90).max(-1) > 0
+    assert not changed[790:].any()
+    assert changed[400:650, 280:320].all()
+    assert log["figure_px"] == int((person & limit).sum())
+
+
+def test_cli_layout_her_region_uses_pose_words_and_scenery_beyond(tmp_path, monkeypatch):
+    # Round 21: her tags and pose words only in her region, scenery beyond.
+    from vr180 import cli, forge, subject
+    src = checker(416, 608)
+    Image.fromarray(src).save(tmp_path / "src.png")
+    seg_model = tmp_path / "seg.onnx"
+    seg_model.write_bytes(b"x")
+    fake = ColourForge()
+
+    class FakeSeg:
+        def __init__(self, path):
+            self.fn = her_segment(src)
+
+        def __call__(self, rgb, threshold=0.5):
+            return self.fn(rgb, threshold)
+
+    monkeypatch.setattr(subject, "Segmenter", FakeSeg)
+    monkeypatch.setattr(forge.Forge, "resolve", lambda self, s: [])
+    monkeypatch.setattr(forge.Forge, "inpaint",
+                        lambda self, image, mask, prompt, negative, seed, s, **kw:
+                        fake(image, mask, prompt, negative, seed, **kw))
+    rc = cli.main([str(tmp_path / "src.png"), "-o", str(tmp_path / "o_180_LR.jpg"), "--checkpoint",
+                   "c", "--tags", "indoors, room", "--subject-tags", "1girl, skirt",
+                   "--subject-framing", "sitting, cowboy shot", "--long-side", "60",
+                   "--width", "1024", "--view-px", "256", "--segment-model", str(seg_model),
+                   "--pano-only", "--join", "hard", "--extend-in-layout", "--layout-her-region",
+                   "3", "--extend-side", "0.6", "--layout", "fisheye", "--layout-px", "256",
+                   "--layout-hires", "512", "--layout-strong", "--compose", "0",
+                   "--seam-repaint", "0.4", "--soften-rim", "0", "--adetail", "0.2"])
+    assert rc == 0
+    first = fake.calls[0]
+    assert first["regions"] is not None
+    her_p = [p for p, _m in first["regions"] if "1girl" in p]
+    rest = [p for p, _m in first["regions"] if "1girl" not in p]
+    assert len(her_p) == 1 and "sitting" in her_p[0] and "cowboy shot" not in her_p[0]
+    assert rest and all("no humans" in p for p in rest)
+    log = json.loads((tmp_path / "o_180_LR.work" / "log.json").read_text(encoding="utf-8"))
+    assert log["extend_in_layout"]["adetail"] is not None
+
+
+def test_layout_close_negative_reaches_the_full_prompt_layout(tmp_path, monkeypatch):
+    # Round 21: the close-up negative goes to the layout and its hires tiles.
+    from vr180 import layout, prompts
+    src = checker(416, 608)
+    pano, mask, _f = sphere.place(src, 1024, 60.0)
+    fake = ColourForge()
+    neg = prompts.CLOSE_NEGATIVE + ", " + prompts.SUBJECT_NEGATIVE
+    layout.make_layout(pano, mask > 0, ["room"], None, fake, seed=1, S=256, hires=512,
+                       full_prompt="1girl, sitting", full_negative=neg)
+    assert all(c["negative"] == neg for c in fake.calls)
+    assert "giantess" in fake.calls[0]["negative"]

@@ -46,9 +46,10 @@ def body_reach(seg: np.ndarray, add: dict, factor: float = 1.5) -> dict:
 
 def her_on_fisheye(src: np.ndarray, seg: np.ndarray, cut: list[str], long_side: float, W: int,
                    S: int, max_deg: float, grow_frac: float = 1.0,
-                   max_side_deg: float = 70.0) -> np.ndarray | None:
+                   max_side_deg: float = 70.0, reach: float = 1.5) -> np.ndarray | None:
     """Round 7: her body and its continuation (the fan) on an S px fisheye, for a
-    regional prompt; None when nothing is cut."""
+    regional prompt; None when nothing is cut. ``reach``: how far the fan runs past
+    each cut edge, in crossing widths (``body_reach``)."""
     h, w = src.shape[:2]
     f = grow.focal(w, h, long_side)
     add = grow.side_growth(w, h, cut, grow_frac, f, max_side_deg)
@@ -56,7 +57,7 @@ def her_on_fisheye(src: np.ndarray, seg: np.ndarray, cut: list[str], long_side: 
         return None
     Wc, Hc, x0, y0 = grow.canvas_geometry(w, h, add)
     cx, cy = x0 + w / 2, y0 + h / 2
-    zone = grow.body_zone(seg, (x0, y0, w, h), (Hc, Wc), body_reach(seg, add))
+    zone = grow.body_zone(seg, (x0, y0, w, h), (Hc, Wc), body_reach(seg, add, reach))
     body = np.zeros((Hc, Wc), bool)
     body[y0:y0 + h, x0:x0 + w] = seg
     her = cv2.dilate((zone | body).astype(np.uint8), np.ones((15, 15), np.uint8)) * 255
@@ -99,9 +100,14 @@ def extend(src: np.ndarray, seg: np.ndarray, cut: list[str], long_side: float, W
         top = left = side = g = 0
         her = prompts.subject_prompt(list(subject_tags) + list(framing), list(fill_tags), where,
                                      0.0, quality)
+        # ADetailer's reach: a generous 3x the crossing width (the fan above is
+        # 1.5x), so long legs and feet the layout drew are kept in the pass.
+        wide = grow.body_zone(seg, (x0, y0, w, h), (Hc, Wc), body_reach(seg, add, 3.0))
+        wide[y0:y0 + h, x0:x0 + w] = True
+        limit = cv2.dilate(wide.astype(np.uint8), np.ones((65, 65), np.uint8)) > 0
         return _flat(src, fish, W, max_deg, f, Wc, Hc, x0, y0, cx, cy, zone, inpaint, her, seed,
                      steps, refine_denoise, work, cut, add, (top, left, side), g, "regional",
-                     segment, adetail)
+                     segment, adetail, limit)
     ys, xs = np.nonzero(zf | sf)
     # A crop holding her and the fan, with a third again of room around them.
     y_a, y_b, x_a, x_b = ys.min(), ys.max() + 1, xs.min(), xs.max() + 1
@@ -130,7 +136,8 @@ def extend(src: np.ndarray, seg: np.ndarray, cut: list[str], long_side: float, W
 
 
 def adetail(canvas: np.ndarray, rect, segment, inpaint, prompt: str, negative: str, seed: int,
-            denoise: float, steps: int | None = None, budget: int = 1280 * 1024) -> dict:
+            denoise: float, steps: int | None = None, budget: int = 1280 * 1024,
+            limit: np.ndarray | None = None) -> dict:
     """An ADetailer pass over her whole figure (round 16, the author's idea): find
     everything the segmenter sees as her that joins her body in the source, crop
     round it with room, and repaint the whole figure once at ``denoise`` with the
@@ -142,6 +149,10 @@ def adetail(canvas: np.ndarray, rect, segment, inpaint, prompt: str, negative: s
     in_src = np.zeros(seg.shape, bool)
     in_src[y0:y0 + h, x0:x0 + w] = True
     person = grow.track_body(seg, seg & in_src)
+    if limit is not None:
+        # Only where her body can reach from the source (round 18: a giant second
+        # Yamato the layout drew touched her, and the pass took the whole canvas).
+        person &= limit
     if person.sum() < 64:
         return {"skipped": "no figure found"}
     ys, xs = np.nonzero(person)
@@ -166,7 +177,8 @@ def adetail(canvas: np.ndarray, rect, segment, inpaint, prompt: str, negative: s
 
 
 def _flat(src, fish, W, max_deg, f, Wc, Hc, x0, y0, cx, cy, zone, inpaint, her, seed, steps,
-          refine_denoise, work, cut, add, crop, g, order, segment=None, adetail_denoise=0.0):
+          refine_denoise, work, cut, add, crop, g, order, segment=None, adetail_denoise=0.0,
+          adetail_limit=None):
     """The grown flat canvas out of the (updated) fisheye; the fan refined there at
     the source's resolution."""
     h, w = src.shape[:2]
@@ -177,7 +189,7 @@ def _flat(src, fish, W, max_deg, f, Wc, Hc, x0, y0, cx, cy, zone, inpaint, her, 
     ad_log = None
     if adetail_denoise > 0 and segment is not None:
         ad_log = adetail(canvas, (x0, y0, w, h), segment, inpaint, her, prompts.SUBJECT_NEGATIVE,
-                         seed + 900, adetail_denoise, steps=steps)
+                         seed + 900, adetail_denoise, steps=steps, limit=adetail_limit)
         # The source faded back in over 32 px, exact from there in.
         inside = np.zeros((Hc, Wc), np.uint8)
         inside[y0:y0 + h, x0:x0 + w] = 1

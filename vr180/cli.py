@@ -161,6 +161,16 @@ def parse(argv=None):
                    help="the source's pose and framing words (e.g. 'sitting, crossed legs, "
                         "cowboy shot'); with --extend-regional they go into her region's prompt "
                         "so it knows where her body ends (round 7)")
+    p.add_argument("--layout-close-negative", action="store_true",
+                   help="round 21, with --layout-full-prompt: add close-up / giantess / "
+                        "multiple views to the layout's negative (r18-20: a giant second "
+                        "Yamato over the floor in front of her, on every seed)")
+    p.add_argument("--layout-her-region", type=float, default=0.0, metavar="R",
+                   help="round 21, with --extend-in-layout (instead of --layout-full-prompt): "
+                        "the layout draws her with her tags and pose words only within R "
+                        "crossing widths of where the frame cuts her, and scenery with no "
+                        "people beyond (r18: the full prompt everywhere drew a second, giant "
+                        "Yamato over the floor in front of her); use with --adetail")
     p.add_argument("--layout-owns-scenery", action="store_true",
                    help="round 9 (the author's pick): with --extend-side and --layout fisheye, the "
                         "extension gives only her body; the layout is made with only the source "
@@ -325,14 +335,17 @@ def main(argv=None) -> int:
     if a.extend_in_layout and seg_src is not None and a.layout == "fisheye":
         pano0, m0, _f = centred(src)
         region = None
-        if a.extend_regional:
+        if a.extend_regional or a.layout_her_region > 0:
             her_f = inlayout.her_on_fisheye(src, seg_src, cut, long_side, W, a.layout_px,
                                             a.layout_deg, a.extend_side or 1.0,
-                                            a.extend_max_deg)
+                                            a.extend_max_deg,
+                                            reach=a.layout_her_region or 1.5)
             if her_f is not None:
                 # Her pose and framing, and the same projection words as the scene
-                # (round 7: her region had neither, and was filled with her).
-                framing = prompts.split_tags(a.subject_framing)
+                # (round 7: her region had neither, and was filled with her). Round
+                # 21: the pose words only -- crop words stretched Nami in round 8.
+                framing = (prompts.pose_words(a.subject_framing) if a.layout_her_region > 0
+                           else prompts.split_tags(a.subject_framing))
                 lens = ["(fisheye:1.3)", "fisheye lens"] if a.layout_strong else ["fisheye"]
                 her_p = prompts.subject_prompt(lens + list(subject_tags) + framing, tags, where,
                                                0.0, a.quality)
@@ -345,7 +358,9 @@ def main(argv=None) -> int:
                                             tags, where, 0.0, a.quality)
         lay, extra_log["layout"], fish = layout.make_layout(
             pano0, m0 > 0, tags, where, inpaint, a.seed + 7000, return_fisheye=True,
-            region=region, full_prompt=full_p, **lay_kw)
+            region=region, full_prompt=full_p,
+            full_negative=(prompts.CLOSE_NEGATIVE + ", " + prompts.SUBJECT_NEGATIVE
+                           if a.layout_close_negative else None), **lay_kw)
         res = inlayout.extend(src, seg_src, cut, long_side, W, fish, a.layout_deg, inpaint,
                               subject_tags, tags, where, a.seed + 5000, quality=a.quality,
                               reference=ref, steps=a.steps, grow_frac=a.extend_side or 1.0,

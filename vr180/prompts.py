@@ -15,6 +15,9 @@ NEGATIVE = NO_PEOPLE + ", " + BASE_NEGATIVE
 #: A view continuing the subject: one body, the one that is already there.
 SUBJECT_NEGATIVE = ("multiple girls, multiple boys, extra person, extra arms, extra legs, "
                     "extra hands, bad anatomy, cropped, " + BASE_NEGATIVE)
+#: Round 21: with the full prompt, the layout drew a second, giant Yamato -- a
+#: headless close-up torso -- over the floor in front of her, on three seeds.
+CLOSE_NEGATIVE = "close-up, giantess, multiple views, pov, head out of frame"
 
 _INDOOR = {"indoors", "room", "bedroom", "living room", "classroom", "kitchen", "bathroom",
            "ceiling", "wooden ceiling", "wall", "shouji", "window", "curtains", "floor",

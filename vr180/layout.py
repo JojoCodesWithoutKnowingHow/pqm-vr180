@@ -79,7 +79,8 @@ def make_layout(pano: np.ndarray, known: np.ndarray, fill_tags: list[str], where
                 reference: np.ndarray | None = None, steps: int | None = None,
                 work=None, strong: bool = False, hires: int = 0,
                 hires_denoise: float = 0.4, return_fisheye: bool = False,
-                region: tuple | None = None, full_prompt: str | None = None):
+                region: tuple | None = None, full_prompt: str | None = None,
+                full_negative: str | None = None):
     """(layout equirect the size of ``pano``, log). Outside the fisheye's disc the
     layout is the disc's edge carried outward and blurred, so a view there still
     starts from something of the scene's colour.
@@ -115,7 +116,7 @@ def make_layout(pano: np.ndarray, known: np.ndarray, fill_tags: list[str], where
     prompt = layout_prompt(fill_tags, where, quality, strong=strong)
     hires_negative = prompts.NEGATIVE
     if full_prompt:
-        prompt, negative = full_prompt, prompts.SUBJECT_NEGATIVE
+        prompt, negative = full_prompt, full_negative or prompts.SUBJECT_NEGATIVE
         hires_negative = negative
     extra = {}
     if region is not None:
