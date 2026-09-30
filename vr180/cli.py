@@ -357,7 +357,8 @@ def main(argv=None) -> int:
 
             def scene_of(cw, ch, cx, cy, lay=lay, f0=f0):
                 return sphere.flat_of(lay, cw, ch, f0, cx, cy)
-        g = grow.extend_side(src, cut, a.extend_side, long_side, inpaint, subject_tags, tags,
+        ext_tags = list(dict.fromkeys(list(subject_tags) + prompts.pose_words(a.subject_framing)))
+        g = grow.extend_side(src, cut, a.extend_side, long_side, inpaint, ext_tags, tags,
                              where, a.seed + 5000, quality=a.quality, reference=ref,
                              steps=a.steps, max_deg=a.extend_max_deg,
                              refine_denoise=a.extend_refine, step=a.extend_step,

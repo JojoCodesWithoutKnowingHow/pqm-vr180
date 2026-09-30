@@ -107,7 +107,7 @@ def _paste(canvas: np.ndarray, region, img: np.ndarray, mask: np.ndarray) -> Non
                       ).round().astype(np.uint8)
 
 
-def _paste_across(canvas: np.ndarray, img: np.ndarray, band: np.ndarray, r: int = 12) -> None:
+def _paste_across(canvas: np.ndarray, img: np.ndarray, band: np.ndarray, r: int = 24) -> None:
     """``img`` (the canvas's size) into ``canvas`` over ``band``, cross-faded ``r``
     px either side of the band's edge (dev6 on the pod: each step's band met the
     last in a thin straight line the full-resolution pass could not remove)."""
@@ -220,7 +220,7 @@ def extend_side(src: np.ndarray, cut: list[str], grow: float, long_side: float, 
                 subject_tags, fill_tags, where: str | None, seed: int,
                 quality: str = prompts.QUALITY, reference: np.ndarray | None = None,
                 steps: int | None = None, budget: int = 1280 * 1024, max_deg: float = 70.0,
-                refine_denoise: float = 0.35, rim: int = 8, step: float = 0.3,
+                refine_denoise: float = 0.35, rim: int = 16, step: float = 0.3,
                 segment=None, scene_of=None, max_steps: int = 8) -> Grown | None:
     """Grow each cut side ``step`` times the source's size at a time, and stop a
     side as soon as the body no longer reaches its new edge, or at ``grow`` in all,
@@ -337,7 +337,7 @@ def extend_side(src: np.ndarray, cut: list[str], grow: float, long_side: float, 
                     out = init                 # keep the pre-fill; the sphere views go on
                 big = cv2.resize(out, (cw, ch), interpolation=cv2.INTER_LANCZOS4)
                 if scene_of is not None:
-                    _paste_across(canvas, big, zone)    # only the body, over the scene
+                    _paste_across(canvas, big, zone, r=8)   # only the body, over the scene; a tight edge
                 elif k == 0:
                     _paste(canvas, region, big, m)      # the scene pass crosses this one
                 else:
@@ -366,8 +366,17 @@ def extend_side(src: np.ndarray, cut: list[str], grow: float, long_side: float, 
                         prompts.view_prompt(list(fill_tags), where, 0.0, quality),
                         prompts.view_negative(prompts.NEGATIVE, where, 0.0),
                         seed + 700, refine_denoise, steps=steps)
-        # Inside the rim, the source stays exactly as it was.
-        canvas[y0 + rim:y0 + h - rim, x0 + rim:x0 + w - rim] = src[rim:h - rim, rim:w - rim]
+        # The source faded back in over the rim, exact from ``rim`` px in: a hard
+        # cut at the rim left an 8 px strip that was neither the source nor the
+        # extension, with an edge on both sides (round 12: the original's rectangle
+        # traced in lines through Fubuki's bed, in every variant since round 2).
+        inside = np.zeros((H, W), np.uint8)
+        inside[y0:y0 + h, x0:x0 + w] = 1
+        d = cv2.distanceTransform(inside, cv2.DIST_L2, 5)[y0:y0 + h, x0:x0 + w]
+        wsrc = np.clip(d / rim, 0, 1)[..., None]
+        region = canvas[y0:y0 + h, x0:x0 + w].astype(np.float32)
+        canvas[y0:y0 + h, x0:x0 + w] = (src.astype(np.float32) * wsrc + region * (1 - wsrc)
+                                        ).round().astype(np.uint8)
     g = Grown(canvas, (x0, y0, w, h), f, (x0 + w / 2, y0 + h / 2),
               {"cut": cut, "grow": grow, "step": step, "limit": limit, "added": add,
                "canvas": [W, H], "passes": passes, "refine_tiles": tiles,

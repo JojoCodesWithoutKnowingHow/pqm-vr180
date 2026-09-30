@@ -415,3 +415,23 @@ def test_extension_records_where_it_painted_her():
     x0, y0, w, h = g.rect
     assert g.fans is not None and g.fans.shape == g.image.shape[:2]
     assert g.fans[y0 + h:].any() and not g.fans[y0:y0 + h, x0:x0 + w].any()
+
+
+def test_the_source_fades_back_in_with_no_step_at_its_rim():
+    # Round 12: a hard cut 8 px inside the source left a strip with an edge on both
+    # sides -- the original's rectangle traced in lines. Across the rim the change
+    # from the extension to the source must be gradual.
+    src = np.full((608, 416, 3), 100, np.uint8)
+    g = grow.extend_side(src, ["bottom"], 0.3, 60.0, ColourForge(), ("1girl",), ["room"], None,
+                         seed=1, refine_denoise=0.35, step=0.3,
+                         segment=lambda rgb, threshold=0.5: np.zeros(rgb.shape[:2], bool))
+    x0, y0, w, h = g.rect
+    col = g.image[y0 + h - 40:y0 + h + 10, x0 + w // 2].astype(int)   # down across the bottom rim
+    assert np.abs(np.diff(col, axis=0)).max() <= 40                   # no single-pixel step
+    assert (g.image[y0 + 16:y0 + h - 16, x0 + 16:x0 + w - 16] == 100).all()   # exact inside
+
+
+def test_pose_words_drop_the_crop():
+    from vr180 import prompts
+    assert prompts.pose_words("lying, on side, upper body, reaching towards viewer, cowboy shot") == \
+        ["lying", "on side", "reaching towards viewer"]

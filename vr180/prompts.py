@@ -44,6 +44,20 @@ EARTHWARD = {"ground", "grass", "floor", "wooden floor", "tatami", "carpet", "ru
              "reflection", "sand", "dirt", "field", "alpine lake", "couch", "chair",
              "table", "coffee table", "bench"}
 
+#: Framing words that describe the source's crop, not her pose: given to the
+#: extension they tell the model to cut her off where the frame did.
+CROP = {"upper body", "cowboy shot", "portrait", "close-up", "face focus", "lower body",
+        "head out of frame", "feet out of frame", "out of frame", "cropped legs",
+        "cropped torso", "bust", "headshot"}
+
+
+def pose_words(framing: str) -> list[str]:
+    """The pose in the source's framing words, without the crop ones (round 12:
+    the extension continued her body without being told she was lying on her side
+    reaching towards the viewer)."""
+    return [t for t in split_tags(framing) if t.lower() not in CROP]
+
+
 def split_tags(text: str) -> list[str]:
     return [t.strip().replace("_", " ") for t in text.replace("\n", ",").split(",") if t.strip()]
 
