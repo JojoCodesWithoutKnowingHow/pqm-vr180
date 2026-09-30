@@ -368,3 +368,41 @@ def test_body_reach_follows_the_crossing_not_the_source():
     reach = inlayout.body_reach(seg, {"bottom": 600, "right": 400, "top": 600})
     assert reach == {"bottom": 120, "right": 60}  # 1.5x each crossing; nothing at the top
     assert inlayout.body_reach(seg, {"bottom": 50}) == {"bottom": 50}   # never past the limit
+
+
+@pytest.mark.parametrize("variant", ["J", "K"])
+def test_cli_runs_round_nine(tmp_path, monkeypatch, variant):
+    # J: the extension gives only her body, the layout owns the scenery; K: layout
+    # first on the current pipeline (scene-first growth, hires layout, compose 0).
+    from vr180 import cli, forge, subject
+    src = checker(416, 608)
+    Image.fromarray(src).save(tmp_path / "src.png")
+    seg_model = tmp_path / "seg.onnx"
+    seg_model.write_bytes(b"x")
+    fake = ColourForge()
+
+    class FakeSeg:
+        def __init__(self, path):
+            self.fn = her_segment(src)
+
+        def __call__(self, rgb, threshold=0.5):
+            return self.fn(rgb, threshold)
+
+    monkeypatch.setattr(subject, "Segmenter", FakeSeg)
+    monkeypatch.setattr(forge.Forge, "resolve", lambda self, s: [])
+    monkeypatch.setattr(forge.Forge, "inpaint",
+                        lambda self, image, mask, prompt, negative, seed, s, **kw:
+                        fake(image, mask, prompt, negative, seed, **kw))
+    base = [str(tmp_path / "src.png"), "-o", str(tmp_path / "o_180_LR.jpg"), "--checkpoint", "c",
+            "--tags", "indoors, room", "--subject-tags", "1girl, skirt", "--long-side", "60",
+            "--width", "1024", "--view-px", "256", "--segment-model", str(seg_model), "--pano-only",
+            "--join", "hard", "--extend-side", "0.6", "--layout", "fisheye", "--layout-px", "256",
+            "--layout-hires", "512", "--compose", "0", "--seam-repaint", "0.4", "--soften-rim", "0"]
+    extra = ["--layout-owns-scenery"] if variant == "J" else ["--order", "scene-first"]
+    assert cli.main(base + extra) == 0
+    log = json.loads((tmp_path / "o_180_LR.work" / "log.json").read_text(encoding="utf-8"))
+    if variant == "J":
+        assert "layout_owns_scenery" in log and "repaint_silhouette" in log["seam"]
+    else:
+        assert log["extend_side"]["order"] == "scene-first"
+    assert {v["kind"] for v in log["widen"]["views"]} <= {"scene"}

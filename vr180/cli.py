@@ -16,6 +16,7 @@ import sys
 import time
 from pathlib import Path
 
+import cv2
 import numpy as np
 from PIL import Image
 
@@ -160,6 +161,12 @@ def parse(argv=None):
                    help="the source's pose and framing words (e.g. 'sitting, crossed legs, "
                         "cowboy shot'); with --extend-regional they go into her region's prompt "
                         "so it knows where her body ends (round 7)")
+    p.add_argument("--layout-owns-scenery", action="store_true",
+                   help="round 9 (the author's pick): with --extend-side and --layout fisheye, the "
+                        "extension gives only her body; the layout is made with only the source "
+                        "and her body fixed, so the floor and furniture around her legs come from "
+                        "the same pass as the room; the picture keeps only the source and her "
+                        "body, and her outline is seam-repainted")
     p.add_argument("--extend-step", type=float, default=0.3,
                    help="grow a cut side this fraction of the source's size at a time, and stop "
                         "once the body no longer reaches the new edge (round 2: growing it all at "
@@ -273,6 +280,7 @@ def main(argv=None) -> int:
 
     picture, place, orig_mask, lay = src, centred, None, None
     seg_picture = segment
+    grown_g, silhouette = None, None
     seg_src = segment(src) if (segment is not None and subject_tags) else None
     cut = widen._cut_edges(seg_src) if seg_src is not None else []
     lay_kw = dict(max_deg=a.layout_deg, S=a.layout_px, quality=a.quality, reference=ref,
@@ -348,6 +356,7 @@ def main(argv=None) -> int:
                              segment=segment, scene_of=scene_of)
         if g is not None:
             picture = g.image
+            grown_g = g
             # The sphere views continue only the body we started with, never a
             # figure the extension happened to paint (round 2b).
             body_mask = g.body
@@ -382,7 +391,31 @@ def main(argv=None) -> int:
             extra_log["flat_extend"] = {"skipped": "the frame cuts no subject"}
     elif a.flat_extend > 0 or a.extend_side > 0:
         extra_log["extend"] = {"skipped": "no subject tags or no segmenter"}
-    if a.layout == "fisheye" and lay is None:
+    if (a.layout == "fisheye" and lay is None and a.layout_owns_scenery and grown_g is not None
+            and grown_g.body is not None):
+        # J: only the source and her body are fixed; the layout paints the rest of
+        # the grown canvas -- the floor under her feet, the furniture by her legs --
+        # in the same pass as the room (round 8: two separately made floors met at
+        # the grown picture's edge).
+        gx, gy, gw, gh = grown_g.rect
+        keep = cv2.dilate(grown_g.body.astype(np.uint8), np.ones((11, 11), np.uint8)) > 0
+        keep[gy:gy + gh, gx:gx + gw] = True
+        pano0, m0, _f = place(picture)
+        kp, _km, _kf = place((keep * 255).astype(np.uint8))
+        known = (kp > 127) & (m0 > 0)
+        lay, extra_log["layout"] = layout.make_layout(pano0, known, tags, where, inpaint,
+                                                      a.seed + 7000, **lay_kw)
+        ch, cw = picture.shape[:2]
+        scene = sphere.flat_of(lay, cw, ch, grown_g.focal, *grown_g.centre)
+        # A soft edge a few pixels either side of what is kept (keep is her body
+        # grown 5 px, so the fade falls on the layout's side of her outline).
+        wk = np.clip(cv2.GaussianBlur(keep.astype(np.float32), (0, 0), 2.0), 0, 1)[..., None]
+        picture = (picture.astype(np.float32) * wk + scene.astype(np.float32) * (1 - wk)
+                   ).round().astype(np.uint8)
+        Image.fromarray(picture).save(work / "flat_extended.png")
+        silhouette = known
+        extra_log["layout_owns_scenery"] = {"kept_frac": round(float(keep.mean()), 3)}
+    elif a.layout == "fisheye" and lay is None:
         pano0, m0, _f = place(picture)
         lay, extra_log["layout"] = layout.make_layout(pano0, m0 > 0, tags, where, inpaint,
                                                       a.seed + 7000, **lay_kw)
@@ -408,6 +441,11 @@ def main(argv=None) -> int:
             seam["repaint_inner"] = seams.repaint(r.pano, orig_mask > 0, inpaint, sp, sn,
                                                   a.seed + 9500, denoise=a.seam_repaint,
                                                   steps=a.steps)
+        if silhouette is not None:
+            # Her outline, where her body meets the layout's scenery (J).
+            seam["repaint_silhouette"] = seams.repaint(r.pano, silhouette, inpaint, sp, sn,
+                                                       a.seed + 9700, denoise=0.35, inner=4,
+                                                       outer=12, steps=a.steps)
     seam["ratio_before"] = round(post.detail_ratio(r.pano, src_mask > 0), 3)
     if a.detail_match:
         r.pano, seam["detail_amount"] = post.detail_match(r.pano, src_mask > 0)
