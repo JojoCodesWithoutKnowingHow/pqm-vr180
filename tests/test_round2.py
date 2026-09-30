@@ -967,6 +967,7 @@ def test_cli_layout_fine_runs_between_the_layout_and_the_flat_canvas(tmp_path, m
                    "--width", "1024", "--view-px", "256", "--segment-model", str(seg_model),
                    "--pano-only", "--join", "hard", "--extend-in-layout", "--layout-full-prompt",
                    "--layout-mask-grow", "0", "--layout-mask-blur", "4", "--layout-fine", "512",
+                   "--layout-joint", "1024",
                    "--extend-side", "0.6", "--layout", "fisheye", "--layout-px", "256",
                    "--layout-hires", "512", "--compose", "0", "--seam-repaint", "0.4",
                    "--soften-rim", "0", "--adetail", "0.27"])
@@ -974,3 +975,30 @@ def test_cli_layout_fine_runs_between_the_layout_and_the_flat_canvas(tmp_path, m
     log = json.loads((tmp_path / "o_180_LR.work" / "log.json").read_text(encoding="utf-8"))
     assert "layout_fine" in log
     assert (tmp_path / "o_180_LR.work" / "layout_fisheye_fine.png").exists() or "skipped" in log["layout_fine"]
+    assert "layout_joint" in log
+
+
+def test_joint_pass_joins_only_her_body_near_the_source_edge():
+    # Round 34: the hole is her body within ``reach_px`` of the source's edge; the
+    # source and her body further out stay fixed.
+    from vr180 import inlayout, layout
+    src = checker(416, 608)
+    S = 1024
+    pano, m0, _f = sphere.place(src, 1024, 60.0)
+    known = layout.to_fisheye(((m0 > 0) * 255).astype(np.uint8), S, 100.0, cv2.INTER_NEAREST) > 127
+    ys, xs = np.nonzero(known)
+    cx = (xs.min() + xs.max()) // 2
+    fish = np.full((S, S, 3), 90, np.uint8)
+    lay_body = np.zeros((S, S), bool)
+    lay_body[ys.min() + 20:ys.max() + 200, cx - 8:cx + 8] = True     # her leg, long
+    fake = ColourForge()
+    out, log = inlayout.joint_pass(fish, src, 60.0, 1024, 100.0,
+                                   lambda rgb, threshold=0.5: lay_body, fake, "1girl", "",
+                                   seed=1, size=S, window=256, reach_px=250, grow_px=4)
+    assert len(fake.calls) == 1 and log["windows"]
+    assert fake.calls[0]["control"] and fake.calls[0]["mask_blur"] == 4
+    reach = log["reach_fisheye_px"]
+    changed = np.abs(out.astype(int) - 90).max(-1) > 0
+    assert not (changed & known).any()                               # the source fixed
+    assert changed[ys.max() + 2:ys.max() + reach - 10, cx - 4:cx + 4].all()   # the joint
+    assert not changed[ys.max() + reach + 30:, :].any()              # her leg further out fixed

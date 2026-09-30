@@ -161,6 +161,11 @@ def parse(argv=None):
                    help="the source's pose and framing words (e.g. 'sitting, crossed legs, "
                         "cowboy shot'); with --extend-regional they go into her region's prompt "
                         "so it knows where her body ends (round 7)")
+    p.add_argument("--layout-joint", type=int, default=0, metavar="PX",
+                   help="round 34, after --layout-fine: on the fisheye at PX, only her body "
+                        "within 250 canvas px of the source's edge is generated anew from a hole, "
+                        "in a 1024 px window at each crossing, both ends fixed (r33: a sliver "
+                        "still out of alignment)")
     p.add_argument("--layout-fine", type=int, default=0, metavar="PX",
                    help="round 33 (the two-scale layout), with --extend-in-layout "
                         "--layout-full-prompt: after the layout (composed at --layout-px), her "
@@ -439,6 +444,13 @@ def main(argv=None) -> int:
                 max_side_deg=a.extend_max_deg)
             if work is not None:
                 Image.fromarray(fish).save(work / "layout_fisheye_fine.png")
+            if a.layout_joint > 0:
+                fish, extra_log["layout_joint"] = inlayout.joint_pass(
+                    fish, src, long_side, W, a.layout_deg, segment, inpaint,
+                    full_p or prompts.subject_prompt(list(subject_tags), tags, where, 0.0,
+                                                     a.quality),
+                    fneg, a.seed + 7700, size=a.layout_joint, steps=a.steps, reference=ref,
+                    mask_blur=a.layout_mask_blur)
         res = inlayout.extend(src, seg_src, cut, long_side, W, fish, a.layout_deg, inpaint,
                               subject_tags, tags, where, a.seed + 5000, quality=a.quality,
                               reference=ref, steps=a.steps, grow_frac=a.extend_side or 1.0,

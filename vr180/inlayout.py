@@ -128,6 +128,73 @@ def fine_pass(fish: np.ndarray, src: np.ndarray, seg: np.ndarray, cut: list[str]
                   "scale": round(window / side, 3), "hole_px": int(hole.sum())}
 
 
+def joint_pass(fish: np.ndarray, src: np.ndarray, long_side: float, W: int, max_deg: float,
+               segment, inpaint, prompt: str, negative: str, seed: int, size: int = 4096,
+               window: int = 1024, reach_px: int = 250, grow_px: int = 12,
+               mask_blur: int | None = 4, steps: int | None = None,
+               reference: np.ndarray | None = None) -> tuple[np.ndarray, dict]:
+    """Round 34 (the author: after the fine pass, a sliver still out of alignment).
+    The fine pass draws her on a grid ~15 canvas px a cell; here, on the fisheye
+    at ``size`` px (~5 canvas px a cell at 4096), only her body within
+    ``reach_px`` canvas px of the source's edge is generated anew from a hole, in
+    a ``window`` px window centred on each place she crosses it -- the source's
+    leg on one side and the fine pass's on the other both fixed, so the model
+    joins two nearly aligned ends over a short span (round 24's bridge had a band
+    across the whole edge, through the empty sofa, and drew a head in it). Pasted
+    with no fade at the source's edge. Returns the fisheye (``size`` px), a log."""
+    if fish.shape[0] != size:
+        fish = cv2.resize(fish, (size, size), interpolation=cv2.INTER_LANCZOS4)
+    else:
+        fish = fish.copy()
+    S = size
+    h, w = src.shape[:2]
+    _pano, m0, _f = sphere.place(src, W, long_side)
+    known = layout.to_fisheye(((m0 > 0) * 255).astype(np.uint8), S, max_deg,
+                              cv2.INTER_NEAREST) > 127
+    if not known.any():
+        return fish, {"skipped": "no source"}
+    # Canvas px to fisheye px near straight ahead: the fisheye's px a radian over
+    # the canvas's focal length.
+    per = ((S / 2) / math.radians(max_deg)) / grow.focal(w, h, long_side)
+    reach = max(8, int(round(reach_px * per)))
+    body = segment(fish)
+    person = grow.track_body(body, body & known)
+    dist = cv2.distanceTransform((~known).astype(np.uint8), cv2.DIST_L2, 5)
+    near = (person & ~known) & (dist <= reach)
+    if near.sum() < 64:
+        return fish, {"skipped": "no body at the source's edge"}
+    k = 2 * grow_px + 1
+    hole = (cv2.dilate(near.astype(np.uint8), np.ones((k, k), np.uint8)) > 0) & ~known
+    hole &= dist <= reach + grow_px
+    n, labels = cv2.connectedComponents(hole.astype(np.uint8), connectivity=8)
+    kw = {} if mask_blur is None else {"mask_blur": mask_blur}
+    windows = []
+    for lab in range(1, n):
+        comp = labels == lab
+        if comp.sum() < 64:
+            continue
+        ys, xs = np.nonzero(comp)
+        side = int(np.clip(max(ys.max() - ys.min(), xs.max() - xs.min()) * 1.6, window, S))
+        cy, cx = (ys.min() + ys.max()) // 2, (xs.min() + xs.max()) // 2
+        top = int(np.clip(cy - side // 2, 0, S - side))
+        left = int(np.clip(cx - side // 2, 0, S - side))
+        region = (slice(top, top + side), slice(left, left + side))
+        crop, hm, km = fish[region], comp[region], known[region]
+        small = cv2.resize(crop, (window, window), interpolation=cv2.INTER_AREA)
+        sm = cv2.resize(hm.astype(np.uint8), (window, window), interpolation=cv2.INTER_NEAREST) > 0
+        control = small.copy()
+        control[sm] = 0                           # NoobAI Inpainting: the hole pure black
+        out = inpaint(small, (sm * 255).astype(np.uint8), prompt, negative, seed + lab,
+                      control=control, reference=reference, steps=steps, **kw)
+        big = cv2.resize(out, (side, side), interpolation=cv2.INTER_LANCZOS4)
+        wgt = (grow.edge_ramp(hm | km, grow.OVERLAP) * hm)[..., None]
+        fish[region] = (crop.astype(np.float32) * (1 - wgt) + big.astype(np.float32) * wgt
+                        ).round().astype(np.uint8)
+        windows.append([int(left), int(top), side])
+    return fish, {"size": S, "reach_fisheye_px": reach, "windows": windows,
+                  "hole_px": int(hole.sum())}
+
+
 def extend(src: np.ndarray, seg: np.ndarray, cut: list[str], long_side: float, W: int,
            fish: np.ndarray, max_deg: float, inpaint, subject_tags, fill_tags,
            where: str | None, seed: int, quality: str = prompts.QUALITY,
