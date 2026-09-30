@@ -447,6 +447,19 @@ def main(argv=None) -> int:
         wk = np.maximum(np.clip(cv2.GaussianBlur(body_keep, (0, 0), 2.0), 0, 1), ramp)[..., None]
         picture = (picture.astype(np.float32) * wk + scene.astype(np.float32) * (1 - wk)
                    ).round().astype(np.uint8)
+        if a.adetail > 0:
+            # The ADetailer pass over her whole figure in J's composed picture (round
+            # 17, the author: round 16 put it on round 8's regional layout, which
+            # stretched Nami). The source is faded back in afterwards.
+            her_p = prompts.subject_prompt(ext_tags, tags, where, 0.0, a.quality)
+            extra_log["adetail"] = inlayout.adetail(picture, grown_g.rect, segment, inpaint, her_p,
+                                                    prompts.SUBJECT_NEGATIVE, a.seed + 900,
+                                                    a.adetail, steps=a.steps)
+            src_back = np.clip(cv2.distanceTransform(rect, cv2.DIST_L2, 5)
+                               [gy:gy + gh, gx:gx + gw] / 32, 0, 1)[..., None]
+            reg = picture[gy:gy + gh, gx:gx + gw].astype(np.float32)
+            picture[gy:gy + gh, gx:gx + gw] = (src.astype(np.float32) * src_back
+                                               + reg * (1 - src_back)).round().astype(np.uint8)
         Image.fromarray(picture).save(work / "flat_extended.png")
         silhouette = known
         extra_log["layout_owns_scenery"] = {"kept_frac": round(float(keep.mean()), 3)}
