@@ -141,6 +141,10 @@ def parse(argv=None):
                    help="grow only the side(s) the frame cuts the body, each by G times the "
                         "source's size across it, keeping its optical centre (0: off). Round 1's "
                         "symmetric --flat-extend gave a cut side only +25%%")
+    p.add_argument("--extend-step", type=float, default=0.3,
+                   help="grow a cut side this fraction of the source's size at a time, and stop "
+                        "once the body no longer reaches the new edge (round 2: growing it all at "
+                        "once painted a second body in the empty space)")
     p.add_argument("--extend-max-deg", type=float, default=70.0,
                    help="the grown edge stays within this angle of straight ahead")
     p.add_argument("--extend-refine", type=float, default=0.35,
@@ -242,21 +246,21 @@ def main(argv=None) -> int:
     lay_kw = dict(max_deg=a.layout_deg, S=a.layout_px, quality=a.quality, reference=ref,
                   steps=a.steps, work=work, strong=a.layout_strong)
     if a.extend_side > 0 and seg_src is not None:
-        scene = None
+        scene_of = None
         if a.order == "scene-first" and a.layout == "fisheye":
             # The author's order: the scene first, then the body painted over it.
             pano0, m0, _f = centred(src)
             lay, extra_log["layout"] = layout.make_layout(pano0, m0 > 0, tags, where, inpaint,
                                                           a.seed + 7000, **lay_kw)
             f0 = grow.focal(w, h, long_side)
-            add = grow.side_growth(w, h, cut, a.extend_side, f0, a.extend_max_deg)
-            if add:
-                cw, ch, x0, y0 = grow.canvas_geometry(w, h, add)
-                scene = sphere.flat_of(lay, cw, ch, f0, x0 + w / 2, y0 + h / 2)
+
+            def scene_of(cw, ch, cx, cy, lay=lay, f0=f0):
+                return sphere.flat_of(lay, cw, ch, f0, cx, cy)
         g = grow.extend_side(src, cut, a.extend_side, long_side, inpaint, subject_tags, tags,
                              where, a.seed + 5000, quality=a.quality, reference=ref,
                              steps=a.steps, max_deg=a.extend_max_deg,
-                             refine_denoise=a.extend_refine, scene=scene, seg=seg_src)
+                             refine_denoise=a.extend_refine, step=a.extend_step,
+                             segment=segment, scene_of=scene_of)
         if g is not None:
             picture = g.image
 

@@ -39,18 +39,25 @@ def test_growth_is_one_sided_and_capped_by_angle():
     assert small == {"bottom": int(0.3 * 1216), "left": int(0.3 * 832)}
 
 
+def green_is_her(rgb, threshold=0.5):
+    return (rgb[..., 1] > 200) & (rgb[..., 0] < 40) & (rgb[..., 2] < 40)
+
+
 def test_extend_side_keeps_the_source_and_lands_it_where_it_was():
     src = checker(416, 608)
     fake = ColourForge()
+    # The fake paints the body green and green counts as her, so the body always
+    # reaches the new edge: two steps of 0.3 to the 0.6 limit.
     g = grow.extend_side(src, ["bottom"], 0.6, 60.0, fake, ("1girl",), ["indoors"], "indoors",
-                         seed=1, refine_denoise=0.35)
+                         seed=1, refine_denoise=0.35, step=0.3, segment=green_is_her)
     x0, y0, w, h = g.rect
-    assert (x0, y0) == (0, 0) and g.image.shape[:2] == (608 + int(0.6 * 608), 416)
+    assert (x0, y0) == (0, 0) and g.log["added"] == {"bottom": 2 * int(0.3 * 608)}
+    assert [p["added"] for p in g.log["passes"]] == [182, 182]
     rim = g.log["rim"]
     assert np.array_equal(g.image[rim:h - rim, rim:w - rim], src[rim:h - rim, rim:w - rim])
     gen = [c for c in fake.calls if not c["touch_up"]]
     ref = [c for c in fake.calls if c["touch_up"]]
-    assert len(gen) == 1 and gen[0]["control"] and gen[0]["her"]
+    assert len(gen) == 2 and all(c["control"] and c["her"] for c in gen)
     assert ref and all(c["denoise"] == 0.35 and not c["control"] for c in ref)
     # The grown canvas keeps the source's optical centre: on the sphere the source
     # sits exactly where it would alone.
@@ -61,6 +68,18 @@ def test_extend_side_keeps_the_source_and_lands_it_where_it_was():
     assert np.median(np.abs(alone[inner].astype(int) - grown[inner].astype(int))) < 6
 
 
+def test_growth_stops_once_the_body_ends():
+    # Round 2's first try grew a full height at once and painted a second body in the
+    # empty space. Here the body is finished within the first step: no more is grown.
+    src = checker(416, 608)
+    fake = ColourForge()
+    g = grow.extend_side(src, ["bottom"], 1.0, 60.0, fake, ("1girl",), [], None, seed=1,
+                         refine_denoise=0, step=0.3,
+                         segment=lambda rgb, threshold=0.5: np.zeros(rgb.shape[:2], bool))
+    assert g.log["added"] == {"bottom": int(0.3 * 608)} and len(fake.calls) == 1
+    assert g.log["passes"][0]["body_reaches_edge"] is False
+
+
 def test_nothing_cut_grows_nothing():
     assert grow.extend_side(checker(64, 64), [], 1.0, 60.0, ColourForge(), (), [], None, 1) is None
 
@@ -69,12 +88,17 @@ def test_scene_first_paints_the_body_only_in_its_fan():
     src = checker(416, 608)
     seg = np.zeros(src.shape[:2], bool)
     seg[304:, 166:250] = True                        # legs cut by the bottom edge
-    f = grow.focal(416, 608, 60.0)
-    add = grow.side_growth(416, 608, ["bottom"], 0.6, f)
-    W, H, x0, y0 = grow.canvas_geometry(416, 608, add)
-    scene = np.full((H, W, 3), (200, 40, 40), np.uint8)     # the laid-out scene: red
-    g = grow.extend_side(src, ["bottom"], 0.6, 60.0, ColourForge(), ("1girl",), ["room"], None,
-                         seed=1, refine_denoise=0, scene=scene, seg=seg)
+
+    def segment(rgb, threshold=0.5):
+        if rgb.shape[:2] == src.shape[:2]:
+            return seg
+        return green_is_her(rgb)
+
+    def scene_of(W, H, cx, cy):
+        return np.full((H, W, 3), (200, 40, 40), np.uint8)     # the laid-out scene: red
+
+    g = grow.extend_side(src, ["bottom"], 0.3, 60.0, ColourForge(), ("1girl",), ["room"], None,
+                         seed=1, refine_denoise=0, step=0.3, segment=segment, scene_of=scene_of)
     below = g.image[608:]
     green = (below[..., 1] > 200) & (below[..., 0] < 40)
     red = (below[..., 0] > 150) & (below[..., 1] < 80)
