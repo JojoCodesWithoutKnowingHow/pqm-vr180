@@ -734,7 +734,7 @@ def test_cli_auto_pipeline_picks_l_when_her_body_runs_out_of_frame(tmp_path, mon
                    "--pano-only", "--join", "hard", "--auto-pipeline", "--extend-side", "0.6",
                    "--extend-refine", "0.35", "--layout", "fisheye", "--layout-px", "256",
                    "--layout-hires", "512", "--compose", "0", "--seam-repaint", "0.4",
-                   "--soften-rim", "0", "--adetail", "0.27", "--bridge", "64"])
+                   "--soften-rim", "0", "--adetail", "0.27", "--align", "200"])
     assert rc == 0
     assert len(calls) == 1                                   # the extension made once
     log = json.loads((tmp_path / "o_180_LR.work" / "log.json").read_text(encoding="utf-8"))
@@ -747,26 +747,57 @@ def test_cli_auto_pipeline_picks_l_when_her_body_runs_out_of_frame(tmp_path, mon
         assert "no humans" in log["layout"]["prompt"] and "adetail" not in log
 
 
-def test_bridge_regenerates_only_a_band_across_each_cut_edge():
-    # Round 23: the join at the frame's edge generated anew, the hole black.
-    from vr180 import inlayout
+
+def _leg_canvas(side):
+    # A leg (a white bar) in the source, and the layout's continuation 30 px off.
     H, W = 1400, 1200
-    canvas = np.full((H, W, 3), 90, np.uint8)
-    rect = (200, 0, 800, 900)                          # cut at the bottom
-    fake = ColourForge()
-    log = inlayout.bridge(canvas, rect, ["bottom"], fake, "1girl", "", seed=1, band=128)
-    assert log["tiles"] >= 1 and all(c["control"] for c in fake.calls)
-    changed = np.abs(canvas.astype(int) - 90).max(-1) > 0
-    assert changed[900:1000, 300:900].all()            # just outside the edge
-    assert changed[885, 300:900].any()                 # and a little into the source
-    assert not changed[:860].any() and not changed[1060:].any()
-    assert not changed[:, :190].any() and not changed[:, 1010:].any()
+    canvas = np.full((H, W, 3), 60, np.uint8)
+    rect = (200, 0, 800, 900)
+    canvas[0:900, 500:560] = 255                       # the source's shin
+    canvas[900:, 530:590] = 255                        # the layout's, 30 px right
+    src_seg = np.zeros((900, 800), bool)
+    src_seg[:, 300:360] = True
+    return canvas, rect, src_seg
 
 
-def test_bridge_covers_a_long_edge_in_tiles():
+def test_align_moves_the_layouts_leg_onto_the_sources_and_fades_out():
+    # Round 25: geometry only; the leg meets the source's at the edge.
     from vr180 import inlayout
-    canvas = np.full((1200, 3000, 3), 90, np.uint8)
-    fake = ColourForge()
-    log = inlayout.bridge(canvas, (0, 0, 3000, 800), ["bottom"], fake, "1girl", "", seed=1)
-    changed = np.abs(canvas.astype(int) - 90).max(-1) > 0
-    assert log["tiles"] >= 3 and changed[820:900, 30:2970].all()
+    canvas, rect, src_seg = _leg_canvas("bottom")
+    before = canvas.copy()
+    log = inlayout.align(canvas, rect, ["bottom"], src_seg,
+                         lambda rgb, threshold=0.5: rgb[..., 0] > 200, falloff=300)
+    assert log["bottom"]["matched"] == 1 and log["bottom"]["shift_px"] == [-30.0, -30.0]
+    row = np.flatnonzero(canvas[902, :, 0] > 200)
+    assert abs(row.min() - 500) <= 2 and abs(row.max() - 559) <= 2      # meets the source
+    far = np.flatnonzero(canvas[1250, :, 0] > 200)
+    assert far.min() == 530 and far.max() == 589                          # untouched past falloff
+    assert (canvas[:900] == before[:900]).all()                           # the source untouched
+    mid = np.flatnonzero(canvas[1050, :, 0] > 200)
+    assert 500 < mid.min() < 530                                          # eased between
+
+
+def test_align_leaves_an_unmatched_edge_alone():
+    from vr180 import inlayout
+    canvas, rect, src_seg = _leg_canvas("bottom")
+    canvas[900:, 530:590] = 60                          # the layout drew no leg
+    before = canvas.copy()
+    log = inlayout.align(canvas, rect, ["bottom"], src_seg,
+                         lambda rgb, threshold=0.5: rgb[..., 0] > 200)
+    assert log["bottom"]["matched"] == 0 and (canvas == before).all()
+
+
+def test_align_works_on_a_side_edge():
+    from vr180 import inlayout
+    canvas, rect, src_seg = _leg_canvas("bottom")
+    c2 = np.ascontiguousarray(np.rot90(canvas, -1))     # the leg now leaves on the left
+    H, W = c2.shape[:2]
+    # rect (x, y, w, h) rotated clockwise: the source's bottom edge is now its left edge.
+    x0, y0, w, h = rect
+    r2 = (W - (y0 + h), x0, h, w)
+    s2 = np.ascontiguousarray(np.rot90(src_seg, -1))
+    log = inlayout.align(c2, r2, ["left"], s2, lambda rgb, threshold=0.5: rgb[..., 0] > 200)
+    assert log["left"]["matched"] == 1
+    back = np.rot90(c2, 1)
+    row = np.flatnonzero(back[902, :, 0] > 200)
+    assert abs(row.min() - 500) <= 2 and abs(row.max() - 559) <= 2
