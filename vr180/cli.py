@@ -167,6 +167,10 @@ def parse(argv=None):
                         "and her body fixed, so the floor and furniture around her legs come from "
                         "the same pass as the room; the picture keeps only the source and her "
                         "body, and her outline is seam-repainted")
+    p.add_argument("--adetail", type=float, default=0.0, metavar="D",
+                   help="round 16 (the author's idea), with --extend-in-layout: an ADetailer pass "
+                        "-- her whole figure, source included, cropped and repainted once at D "
+                        "with the full prompt; then the source restored (0: off)")
     p.add_argument("--source-fade", type=int, default=32, metavar="PX",
                    help="with --layout-owns-scenery: the original fades into the layout over "
                         "this many px inside its rectangle")
@@ -337,7 +341,8 @@ def main(argv=None) -> int:
                               max_side_deg=a.extend_max_deg,
                               refine_denoise=a.extend_refine or 0.5, work=work,
                               paint=region is None, segment=segment,
-                              framing=prompts.split_tags(a.subject_framing))
+                              framing=prompts.pose_words(a.subject_framing),
+                              adetail=a.adetail)
         if res is not None:
             g, fish, extra_log["extend_in_layout"] = res
             img_, cover_ = layout.from_fisheye(fish, W, a.layout_deg)

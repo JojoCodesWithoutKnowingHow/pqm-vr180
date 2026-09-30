@@ -70,7 +70,7 @@ def extend(src: np.ndarray, seg: np.ndarray, cut: list[str], long_side: float, W
            reference: np.ndarray | None = None, steps: int | None = None,
            grow_frac: float = 1.0, max_side_deg: float = 70.0, budget: int = 1280 * 1024,
            refine_denoise: float = 0.5, work=None, paint: bool = True, segment=None,
-           framing=()):
+           framing=(), adetail: float = 0.0):
     """(grown picture as ``grow.Grown``, updated fisheye, log), or None when nothing
     is cut. ``fish`` is the layout's (hires) fisheye, ``max_deg`` its reach.
     ``paint=False`` (round 7): the layout was generated with her region already, so
@@ -101,7 +101,7 @@ def extend(src: np.ndarray, seg: np.ndarray, cut: list[str], long_side: float, W
                                      0.0, quality)
         return _flat(src, fish, W, max_deg, f, Wc, Hc, x0, y0, cx, cy, zone, inpaint, her, seed,
                      steps, refine_denoise, work, cut, add, (top, left, side), g, "regional",
-                     segment)
+                     segment, adetail)
     ys, xs = np.nonzero(zf | sf)
     # A crop holding her and the fan, with a third again of room around them.
     y_a, y_b, x_a, x_b = ys.min(), ys.max() + 1, xs.min(), xs.max() + 1
@@ -129,8 +129,44 @@ def extend(src: np.ndarray, seg: np.ndarray, cut: list[str], long_side: float, W
                  steps, refine_denoise, work, cut, add, (top, left, side), g, "in-layout")
 
 
+def adetail(canvas: np.ndarray, rect, segment, inpaint, prompt: str, negative: str, seed: int,
+            denoise: float, steps: int | None = None, budget: int = 1280 * 1024) -> dict:
+    """An ADetailer pass over her whole figure (round 16, the author's idea): find
+    everything the segmenter sees as her that joins her body in the source, crop
+    round it with room, and repaint the whole figure once at ``denoise`` with the
+    full prompt -- the model sees and refines her as one body, not the extension
+    alone (round 6 refined only the fan). Pasted with the zero-at-the-edge ramp;
+    the caller restores the source. Returns a log."""
+    x0, y0, w, h = rect
+    seg = segment(canvas)
+    in_src = np.zeros(seg.shape, bool)
+    in_src[y0:y0 + h, x0:x0 + w] = True
+    person = grow.track_body(seg, seg & in_src)
+    if person.sum() < 64:
+        return {"skipped": "no figure found"}
+    ys, xs = np.nonzero(person)
+    H, W = seg.shape
+    pad_y = int((ys.max() - ys.min()) * 0.15) + 32
+    pad_x = int((xs.max() - xs.min()) * 0.15) + 32
+    t, b = max(0, ys.min() - pad_y), min(H, ys.max() + 1 + pad_y)
+    l, r = max(0, xs.min() - pad_x), min(W, xs.max() + 1 + pad_x)
+    region = (slice(t, b), slice(l, r))
+    m = cv2.dilate(person[region].astype(np.uint8), np.ones((33, 33), np.uint8)) > 0
+    crop = canvas[region]
+    ch, cw = m.shape
+    gw, gh = grow._gen_size(ch, cw, budget)
+    small = cv2.resize(crop, (gw, gh), interpolation=cv2.INTER_AREA)
+    sm = cv2.resize(m.astype(np.uint8), (gw, gh), interpolation=cv2.INTER_NEAREST)
+    out = inpaint(small, sm * 255, prompt, negative, seed, steps=steps, denoise=denoise,
+                  touch_up=True)
+    big = cv2.resize(out, (cw, ch), interpolation=cv2.INTER_LANCZOS4)
+    grow._paste(canvas, region, big, m)
+    return {"box": [int(l), int(t), int(r), int(b)], "generated_at": [gw, gh],
+            "denoise": denoise, "figure_px": int(person.sum())}
+
+
 def _flat(src, fish, W, max_deg, f, Wc, Hc, x0, y0, cx, cy, zone, inpaint, her, seed, steps,
-          refine_denoise, work, cut, add, crop, g, order, segment=None):
+          refine_denoise, work, cut, add, crop, g, order, segment=None, adetail_denoise=0.0):
     """The grown flat canvas out of the (updated) fisheye; the fan refined there at
     the source's resolution."""
     h, w = src.shape[:2]
@@ -138,6 +174,19 @@ def _flat(src, fish, W, max_deg, f, Wc, Hc, x0, y0, cx, cy, zone, inpaint, her, 
     lay_eq, cover = layout.from_fisheye(fish, W, max_deg)
     canvas = sphere.flat_of(lay_eq, Wc, Hc, f, cx, cy)
     canvas[y0:y0 + h, x0:x0 + w] = src
+    ad_log = None
+    if adetail_denoise > 0 and segment is not None:
+        ad_log = adetail(canvas, (x0, y0, w, h), segment, inpaint, her, prompts.SUBJECT_NEGATIVE,
+                         seed + 900, adetail_denoise, steps=steps)
+        # The source faded back in over 32 px, exact from there in.
+        inside = np.zeros((Hc, Wc), np.uint8)
+        inside[y0:y0 + h, x0:x0 + w] = 1
+        d = cv2.distanceTransform(inside, cv2.DIST_L2, 5)[y0:y0 + h, x0:x0 + w]
+        ws = np.clip(d / 32, 0, 1)[..., None]
+        reg = canvas[y0:y0 + h, x0:x0 + w].astype(np.float32)
+        canvas[y0:y0 + h, x0:x0 + w] = (src.astype(np.float32) * ws + reg * (1 - ws)
+                                        ).round().astype(np.uint8)
+        refine_denoise = 0.0                    # the pass above replaces the fan's refine
     near = cv2.dilate(zone.astype(np.uint8), np.ones((25, 25), np.uint8)) > 0
     if segment is not None:
         # Only what the layout drew as her (round 7: sharpening the whole fan with
@@ -147,7 +196,8 @@ def _flat(src, fish, W, max_deg, f, Wc, Hc, x0, y0, cx, cy, zone, inpaint, her, 
     near[y0 + 8:y0 + h - 8, x0 + 8:x0 + w - 8] = False
     tiles = grow.refine(canvas, near, inpaint, her, prompts.SUBJECT_NEGATIVE, seed + 500,
                         refine_denoise, steps=steps) if refine_denoise > 0 else 0
-    canvas[y0 + 8:y0 + h - 8, x0 + 8:x0 + w - 8] = src[8:h - 8, 8:w - 8]
+    if ad_log is None:
+        canvas[y0 + 8:y0 + h - 8, x0 + 8:x0 + w - 8] = src[8:h - 8, 8:w - 8]
     if work is not None:
         from PIL import Image
         Image.fromarray(fish).save(work / "layout_fisheye_with_body.png")
@@ -155,6 +205,6 @@ def _flat(src, fish, W, max_deg, f, Wc, Hc, x0, y0, cx, cy, zone, inpaint, her, 
                        {"cut": cut, "added": add, "canvas": [Wc, Hc], "order": order,
                         "fisheye_crop": list(crop), "generated_at": g,
                         "refine_tiles": tiles, "refine_denoise": refine_denoise,
-                        "prompt": her})
+                        "adetail": ad_log, "prompt": her})
     g_out.body = None
     return g_out, fish, g_out.log

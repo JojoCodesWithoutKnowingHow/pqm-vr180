@@ -460,3 +460,34 @@ def test_no_ink_line_survives_a_repaint():
                              None, seed=1, refine_denoise=refine, step=0.3,
                              segment=lambda rgb, threshold=0.5: np.zeros(rgb.shape[:2], bool))
         assert g.image.min() >= 140, (refine, g.image.min())
+
+
+def test_adetail_repaints_her_whole_figure_once_and_keeps_the_source():
+    # Round 16 (the author): an ADetailer pass over her whole figure, source part
+    # included, in one generation at low denoise; the source is restored after.
+    from vr180 import inlayout
+    H, W = 900, 700
+    canvas = np.full((H, W, 3), 90, np.uint8)
+    rect = (100, 100, 400, 500)                       # x, y, w, h of the source
+    person = np.zeros((H, W), bool)
+    person[300:800, 250:350] = True                   # her body, running out of the source
+    fake = ColourForge()
+    log = inlayout.adetail(canvas, rect, lambda rgb, threshold=0.5: person, fake, "1girl", "",
+                           seed=1, denoise=0.2)
+    assert len(fake.calls) == 1
+    c = fake.calls[0]
+    assert c["touch_up"] and c["denoise"] == 0.2 and not c["control"]
+    changed = np.abs(canvas.astype(int) - 90).max(-1) > 0
+    assert changed[400:700, 280:320].all()             # her figure, in and out of the source
+    assert not changed[:150].any() and not changed[:, :150].any()   # nothing far from her
+    assert log["figure_px"] == int(person.sum())
+
+
+def test_adetail_skips_when_no_figure_joins_the_source():
+    from vr180 import inlayout
+    canvas = np.full((400, 400, 3), 90, np.uint8)
+    fake = ColourForge()
+    log = inlayout.adetail(canvas, (0, 0, 100, 100),
+                           lambda rgb, threshold=0.5: np.zeros(rgb.shape[:2], bool),
+                           fake, "1girl", "", seed=1, denoise=0.2)
+    assert fake.calls == [] and "skipped" in log
