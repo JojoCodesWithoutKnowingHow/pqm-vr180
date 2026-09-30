@@ -242,3 +242,66 @@ def test_no_dark_rim_at_merge_edges():
     r = widen.widen(src, ["indoors"], ColourForge(), opt, None, say=lambda s: None, layout=lay)
     front = sphere.off_axis_deg(1024) <= 95
     assert r.pano[front].min() >= 146
+
+
+def test_extend_in_layout_paints_only_the_fan_and_keeps_the_source():
+    # Round 6: the body is continued inside the laid-out fisheye, the fan the only
+    # mask, then refined flat at full resolution.
+    from vr180 import inlayout, layout
+    src = checker(416, 608)
+    seg = np.zeros(src.shape[:2], bool)
+    seg[304:, 166:250] = True                        # legs cut by the bottom edge
+    pano, mask, _f = sphere.place(src, 1024, 60.0)
+    fake = ColourForge()
+    lay, _log, fish = layout.make_layout(pano, mask > 0, ["room"], None, fake, seed=1, S=256,
+                                         return_fisheye=True)
+    before = fish.copy()
+    fake2 = ColourForge()
+    g, fish2, log = inlayout.extend(src, seg, ["bottom"], 60.0, 1024, fish, 100.0, fake2,
+                                    ("1girl",), ["room"], None, seed=1, grow_frac=0.6,
+                                    refine_denoise=0.5)
+    first = fake2.calls[0]
+    assert first["her"] and first["control"] and not first["touch_up"]
+    assert first["masked"] < 0.5                      # the fan, not the whole crop
+    assert all(c["touch_up"] and c["denoise"] == 0.5 for c in fake2.calls[1:])
+    changed = np.abs(fish2.astype(int) - before.astype(int)).max(-1) > 0
+    assert changed.any() and changed.mean() < 0.1     # only the fan's part of the fisheye
+    x0, y0, w, h = g.rect
+    assert np.array_equal(g.image[y0 + 8:y0 + h - 8, x0 + 8:x0 + w - 8], src[8:h - 8, 8:w - 8])
+    assert log["order"] == "in-layout" and log["added"] == {"bottom": int(0.6 * 608)}
+
+
+def test_cli_runs_extend_in_layout(tmp_path, monkeypatch):
+    from vr180 import cli, forge, subject
+    src = checker(416, 608)
+    Image.fromarray(src).save(tmp_path / "src.png")
+    seg_model = tmp_path / "seg.onnx"
+    seg_model.write_bytes(b"x")
+    fake = ColourForge()
+
+    class FakeSeg:
+        def __init__(self, path):
+            self.fn = her_segment(src)
+
+        def __call__(self, rgb, threshold=0.5):
+            return self.fn(rgb, threshold)
+
+    monkeypatch.setattr(subject, "Segmenter", FakeSeg)
+    monkeypatch.setattr(forge.Forge, "resolve", lambda self, s: [])
+    monkeypatch.setattr(forge.Forge, "inpaint",
+                        lambda self, image, mask, prompt, negative, seed, s, **kw:
+                        fake(image, mask, prompt, negative, seed, **kw))
+    out = tmp_path / "o_180_LR.jpg"
+    rc = cli.main([str(tmp_path / "src.png"), "-o", str(out), "--checkpoint", "c",
+                   "--tags", "indoors, room", "--subject-tags", "1girl, skirt", "--long-side", "60",
+                   "--width", "1024", "--view-px", "256", "--segment-model", str(seg_model),
+                   "--pano-only", "--join", "hard", "--extend-in-layout", "--extend-side", "0.6",
+                   "--layout", "fisheye", "--layout-px", "256", "--layout-hires", "512",
+                   "--compose", "0", "--seam-repaint", "0.4", "--soften-rim", "0"])
+    assert rc == 0
+    work = tmp_path / "o_180_LR.work"
+    log = json.loads((work / "log.json").read_text(encoding="utf-8"))
+    assert log["extend_in_layout"]["order"] == "in-layout"
+    assert (work / "layout_fisheye_with_body.png").exists()
+    assert {v["kind"] for v in log["widen"]["views"]} <= {"scene"}
+    assert "repaint_inner" in log["seam"]

@@ -19,7 +19,8 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from . import (__version__, flatext, forge, grow, layout, placement, post, prompts, seam as seams,
+from . import (__version__, flatext, forge, grow, inlayout, layout, placement, post, prompts,
+               seam as seams,
                sphere, stereo, widen)
 
 SEG_MODEL = "/workspace/models/anime-seg/isnetis.onnx"
@@ -145,6 +146,11 @@ def parse(argv=None):
                    help="grow only the side(s) the frame cuts the body, each by G times the "
                         "source's size across it, keeping its optical centre (0: off). Round 1's "
                         "symmetric --flat-extend gave a cut side only +25%%")
+    p.add_argument("--extend-in-layout", action="store_true",
+                   help="round 6 (the author's idea): lay the scene out around the source first, "
+                        "then inpaint the body's continuation inside the layout's fisheye -- the "
+                        "fan where the frame cuts her the only mask, the room in view -- and "
+                        "refine it at full resolution (--extend-refine). Needs --layout fisheye")
     p.add_argument("--extend-step", type=float, default=0.3,
                    help="grow a cut side this fraction of the source's size at a time, and stop "
                         "once the body no longer reaches the new edge (round 2: growing it all at "
@@ -262,7 +268,43 @@ def main(argv=None) -> int:
     lay_kw = dict(max_deg=a.layout_deg, S=a.layout_px, quality=a.quality, reference=ref,
                   steps=a.steps, work=work, strong=a.layout_strong, hires=a.layout_hires,
                   hires_denoise=a.layout_hires_denoise)
-    if a.extend_side > 0 and seg_src is not None:
+
+    def grown_place(g):
+        """``place`` for a grown canvas that keeps its source's optical centre."""
+        def place_(img):
+            pano_, mask_ = sphere.place_focal(img, W, g.focal, *g.centre)
+            ih, iw = img.shape[:2]
+            cx, cy = g.centre
+            fov = (math.degrees(math.atan(cx / g.focal) + math.atan((iw - cx) / g.focal)),
+                   math.degrees(math.atan(cy / g.focal) + math.atan((ih - cy) / g.focal)))
+            return pano_, mask_, fov
+        return place_
+
+    def source_in(g):
+        placed_, pm_ = sphere.place_focal(g.source_mask(), W, g.focal, *g.centre)
+        return ((placed_ > 127) & (pm_ > 0)).astype(np.uint8) * 255
+
+    if a.extend_in_layout and seg_src is not None and a.layout == "fisheye":
+        pano0, m0, _f = centred(src)
+        lay, extra_log["layout"], fish = layout.make_layout(
+            pano0, m0 > 0, tags, where, inpaint, a.seed + 7000, return_fisheye=True, **lay_kw)
+        res = inlayout.extend(src, seg_src, cut, long_side, W, fish, a.layout_deg, inpaint,
+                              subject_tags, tags, where, a.seed + 5000, quality=a.quality,
+                              reference=ref, steps=a.steps, grow_frac=a.extend_side or 1.0,
+                              max_side_deg=a.extend_max_deg,
+                              refine_denoise=a.extend_refine or 0.5, work=work)
+        if res is not None:
+            g, fish, extra_log["extend_in_layout"] = res
+            img_, cover_ = layout.from_fisheye(fish, W, a.layout_deg)
+            lay = np.zeros_like(pano0)
+            lay[cover_] = img_[cover_]
+            lay = widen.fill_back(lay, cover_)
+            picture, place, orig_mask = g.image, grown_place(g), source_in(g)
+            Image.fromarray(picture).save(work / "flat_extended.png")
+            print("extend in layout: cut at %s, added %s" % (", ".join(cut), g.log["added"]))
+        else:
+            extra_log["extend_in_layout"] = {"skipped": "the frame cuts no subject", "cut": cut}
+    elif a.extend_side > 0 and seg_src is not None:
         scene_of = None
         if a.order == "scene-first" and a.layout == "fisheye":
             # The author's order: the scene first, then the body painted over it.
@@ -287,16 +329,7 @@ def main(argv=None) -> int:
             def seg_picture(img, body_mask=body_mask):
                 return body_mask if img.shape[:2] == body_mask.shape else segment(img)
 
-            def place(img, g=g):
-                pano_, mask_ = sphere.place_focal(img, W, g.focal, *g.centre)
-                ih, iw = img.shape[:2]
-                cx, cy = g.centre
-                fov = (math.degrees(math.atan(cx / g.focal) + math.atan((iw - cx) / g.focal)),
-                       math.degrees(math.atan(cy / g.focal) + math.atan((ih - cy) / g.focal)))
-                return pano_, mask_, fov
-
-            placed, pm = sphere.place_focal(g.source_mask(), W, g.focal, *g.centre)
-            orig_mask = ((placed > 127) & (pm > 0)).astype(np.uint8) * 255
+            place, orig_mask = grown_place(g), source_in(g)
             Image.fromarray(picture).save(work / "flat_extended.png")
             extra_log["extend_side"] = g.log
             print("extend side: cut at %s, added %s, canvas %s, %s"

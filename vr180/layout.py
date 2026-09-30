@@ -78,7 +78,7 @@ def make_layout(pano: np.ndarray, known: np.ndarray, fill_tags: list[str], where
                 quality: str = prompts.QUALITY, negative: str = prompts.NEGATIVE,
                 reference: np.ndarray | None = None, steps: int | None = None,
                 work=None, strong: bool = False, hires: int = 0,
-                hires_denoise: float = 0.4) -> tuple[np.ndarray, dict]:
+                hires_denoise: float = 0.4, return_fisheye: bool = False):
     """(layout equirect the size of ``pano``, log). Outside the fisheye's disc the
     layout is the disc's edge carried outward and blurred, so a view there still
     starts from something of the scene's colour.
@@ -117,5 +117,7 @@ def make_layout(pano: np.ndarray, known: np.ndarray, fill_tags: list[str], where
     if work is not None:
         from PIL import Image
         Image.fromarray(gen).save(work / "layout_fisheye.png")
-    return out, {"max_deg": max_deg, "px": S, "prompt": prompt, "hires": hires,
-                 "hires_tiles": tiles, "known_frac": round(float(kf.mean()), 3)}
+    log = {"max_deg": max_deg, "px": S, "prompt": prompt, "hires": hires,
+           "hires_tiles": tiles, "known_frac": round(float(kf.mean()), 3)}
+    # ``return_fisheye``: the (hires) fisheye too, for painting into it (round 6).
+    return (out, log, gen) if return_fisheye else (out, log)
