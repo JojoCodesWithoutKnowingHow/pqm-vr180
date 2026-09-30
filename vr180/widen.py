@@ -83,6 +83,13 @@ class Options:
     zone_spread_deg: float = 30.0
     #: Over a layout (S2), how much a scene view may change it.
     layout_denoise: float = 0.7
+    #: Compose (G, the author's idea after round 2): the scene is final once the
+    #: layout is made around the finished picture, so every view is only a detail
+    #: pass over it at ``layout_denoise`` -- no inpaint ControlNet, no view with the
+    #: subject's tags, the full ``seam_px`` blend (the views agree, so nothing
+    #: ghosts). Round 2's E repainted the layout at 0.7 and inked a line at every
+    #: view's edge; F's subject views painted new bodies below the finished one.
+    compose: bool = False
 
 
 @dataclass
@@ -370,10 +377,12 @@ def widen(src: np.ndarray, fill_tags: list[str], inpaint: Inpainter, opt: Option
                             cv2.INTER_NEAREST) > 127
         sq = sphere.view_of((subj * 255).astype(np.uint8), v.yaw, v.pitch, F, q,
                             cv2.INTER_NEAREST) > 127
-        pre_kind = "subject" if subject.touches(sq, ~kq, reach_px=12) else "scene"
+        pre_kind = ("scene" if opt.compose
+                    else "subject" if subject.touches(sq, ~kq, reach_px=12) else "scene")
         off = off_centre_deg(v.yaw, v.pitch)
         steps, S = taper_for(off, pre_kind, opt)
-        seam_px = max(4, int(round((opt.hard_seam_px if hard else opt.seam_px) * S / opt.view_px)))
+        short = hard and not opt.compose
+        seam_px = max(4, int(round((opt.hard_seam_px if short else opt.seam_px) * S / opt.view_px)))
         view = sphere.view_of(pano, v.yaw, v.pitch, F, S)
         kv = sphere.view_of((known * 255).astype(np.uint8), v.yaw, v.pitch, F, S,
                             cv2.INTER_NEAREST) > 127
@@ -399,7 +408,8 @@ def widen(src: np.ndarray, fill_tags: list[str], inpaint: Inpainter, opt: Option
             lv = sphere.view_of(layout, v.yaw, v.pitch, F, S)
             laid = view.copy()
             laid[unknown] = lv[unknown]
-        kind = ("subject" if subject.touches(subj_v, unknown, reach_px=max(12, 48 * S // 1024))
+        kind = ("subject" if not opt.compose
+                and subject.touches(subj_v, unknown, reach_px=max(12, 48 * S // 1024))
                 else "plain" if where == "plain" and opt.plain_fill else "scene")
         if kind == "subject" and pre_kind != "subject" and opt.taper:
             steps = opt.steps               # the full check found the subject after all
@@ -480,6 +490,8 @@ def widen(src: np.ndarray, fill_tags: list[str], inpaint: Inpainter, opt: Option
                 init, extra = seeded, {}
                 if laid is not None and kind == "scene":
                     init, extra = laid, {"denoise": opt.layout_denoise}
+                    if opt.compose:
+                        extra["touch_up"] = True     # a detail pass: no inpaint ControlNet
                 gen = inpaint(init, gen_mask, prompt, negative, opt.seed + n,
                               control=control, reference=ref, steps=steps, **extra)
         secs = time.time() - t0

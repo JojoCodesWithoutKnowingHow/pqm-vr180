@@ -153,6 +153,11 @@ def parse(argv=None):
     p.add_argument("--order", choices=("body-first", "scene-first"), default="body-first",
                    help="scene-first (with --layout fisheye and --extend-side): lay the scene "
                         "out, then paint the body over it in a fan from the cut edge")
+    p.add_argument("--compose", type=float, default=0.0, metavar="D",
+                   help="compose (G): with --layout fisheye, the laid-out scene is final; every "
+                        "view is a detail pass over it at denoise D, no inpaint ControlNet, no "
+                        "view with the subject's tags (0: off). Round 2: E repainted the layout "
+                        "at 0.7 and inked a line at each view's edge; F grew new bodies")
     p.add_argument("--seam-repaint", type=float, default=0.0, metavar="D",
                    help="repaint a narrow band across the picture's edge on the sphere at this "
                         "denoise (0: off). Use with --soften-rim 0")
@@ -208,7 +213,11 @@ def main(argv=None) -> int:
                         reference=a.reference and a.method == "noob",
                         steps=a.steps, taper=a.taper, view_fov=a.view_fov, view_px=a.view_px,
                         join=a.join, zone_spread_deg=a.zone_spread,
-                        layout_denoise=a.layout_denoise)
+                        layout_denoise=a.compose or a.layout_denoise, compose=a.compose > 0)
+    if a.compose > 0 and a.layout != "fisheye":
+        print("--compose needs --layout fisheye: it only details the laid-out scene",
+              file=sys.stderr)
+        return 2
     src = np.array(Image.open(a.src).convert("RGB"))
     h, w = src.shape[:2]
     if a.long_side == "ratio":

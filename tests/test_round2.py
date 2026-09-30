@@ -188,3 +188,22 @@ def test_cli_runs_round_two(tmp_path, monkeypatch, flags):
     mask = np.array(Image.open(work / "source_mask.png")) > 127
     _p, m1, _f = sphere.place(src, 1024, 60.0)
     assert abs(int(mask.sum()) - int((m1 > 0).sum())) < 0.03 * (m1 > 0).sum()
+
+
+def test_compose_only_details_the_layout():
+    # G: once the layout is made around the finished picture the scene is final;
+    # every view is a detail pass over it -- no subject view, no inpaint ControlNet.
+    from vr180 import layout, widen
+    src = checker(416, 608)
+    pano, mask, _f = sphere.place(src, 1024, 60.0)
+    lay, _log = layout.make_layout(pano, mask > 0, ["indoors", "room"], "indoors", ColourForge(),
+                                   seed=1, S=256)
+    fake = ColourForge()
+    opt = widen.Options(width=1024, view_px=256, seam_px=8, subject_tags=("1girl",), taper=False,
+                        join="hard", layout_denoise=0.35, compose=True)
+    r = widen.widen(src, ["indoors", "room"], fake, opt, None, say=lambda s: None,
+                    segment=her_segment(src), layout=lay)
+    assert fake.calls and all(c["touch_up"] and c["denoise"] == 0.35 for c in fake.calls)
+    assert not any(c["her"] for c in fake.calls)
+    assert {v["kind"] for v in r.log["views"]} == {"scene"}
+    assert r.log["front_unfilled"] < 0.002
