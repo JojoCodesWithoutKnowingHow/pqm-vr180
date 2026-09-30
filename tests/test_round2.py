@@ -228,3 +228,17 @@ def test_hires_layout_refines_in_tiles_and_compose_zero_calls_nothing(tmp_path):
                         compose=True)
     r = widen.widen(src, ["indoors"], fake2, opt, None, say=lambda s: None, layout=lay)
     assert fake2.calls == [] and r.log["front_unfilled"] < 0.002
+
+
+def test_no_dark_rim_at_merge_edges():
+    # Round 4 (H0): interpolating across the black of empty pixels darkened the edge
+    # of what was known, and the blend pasted it back as a faint dotted line at
+    # every merge. A uniform scene and a uniform source must come out uniform.
+    from vr180 import widen
+    src = np.full((608, 416, 3), 150, np.uint8)
+    lay = np.full((512, 1024, 3), 150, np.uint8)
+    opt = widen.Options(width=1024, view_px=256, seam_px=8, taper=False, layout_denoise=0.0,
+                        compose=True)
+    r = widen.widen(src, ["indoors"], ColourForge(), opt, None, say=lambda s: None, layout=lay)
+    front = sphere.off_axis_deg(1024) <= 95
+    assert r.pano[front].min() >= 146

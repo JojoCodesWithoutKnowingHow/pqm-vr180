@@ -383,7 +383,12 @@ def widen(src: np.ndarray, fill_tags: list[str], inpaint: Inpainter, opt: Option
         steps, S = taper_for(off, pre_kind, opt)
         short = hard and not opt.compose
         seam_px = max(4, int(round((opt.hard_seam_px if short else opt.seam_px) * S / opt.view_px)))
-        view = sphere.view_of(pano, v.yaw, v.pitch, F, S)
+        # Sampled with the empty part already showing the layout: interpolating
+        # across a black hole darkened the pixels at the edge of what is known, and
+        # the seam band pasted them back as a faint dotted line at every merge
+        # (round 4, H0 -- V.1 found the same leak in the pre-fill, _shrink_known).
+        filled = pano if layout is None else np.where(known[..., None], pano, layout)
+        view = sphere.view_of(filled, v.yaw, v.pitch, F, S)
         kv = sphere.view_of((known * 255).astype(np.uint8), v.yaw, v.pitch, F, S,
                             cv2.INTER_NEAREST) > 127
         sv = sphere.view_of(src_mask, v.yaw, v.pitch, F, S, cv2.INTER_NEAREST) > 127
@@ -524,6 +529,11 @@ def widen(src: np.ndarray, fill_tags: list[str], inpaint: Inpainter, opt: Option
             keep = keep | subj_before[rows][:, cols]
         ws = np.where(cover & ~keep, np.clip(ws, 0, 1), 0).astype(np.float32)
         sub = pano[rows][:, cols]
+        if layout is not None:
+            # Blend against the layout, never the black of an empty pixel: a view's
+            # edge fades in over a pixel or two, and fading into black left the
+            # merge edge dotted dark (round 4).
+            sub = np.where(known[rows][:, cols][..., None], sub, layout[rows][:, cols])
         pano[rows, cols] = (sub * (1 - ws[..., None]) + img * ws[..., None]).round().astype(np.uint8)
         known[rows, cols] |= ws > 0.5
         if kind == "subject" and plain_rest is not None and plain_rest.any():
