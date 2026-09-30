@@ -98,7 +98,7 @@ def _paste(canvas: np.ndarray, region, img: np.ndarray, mask: np.ndarray) -> Non
     or two inside it so a pass leaves no hard edge of its own."""
     rs, cs = region
     m = mask.astype(np.float32)
-    m = cv2.GaussianBlur(m, (0, 0), 1.5) * m
+    m = cv2.GaussianBlur(m, (0, 0), 1.5) * (m > 0) * m
     sub = canvas[rs, cs].astype(np.float32)
     canvas[rs, cs] = (sub * (1 - m[..., None]) + img.astype(np.float32) * m[..., None]
                       ).round().astype(np.uint8)
@@ -147,6 +147,7 @@ def refine(canvas: np.ndarray, mask: np.ndarray, inpaint, prompt: str, negative:
         return s
 
     n = 0
+    fade = 64
     for y in starts(H, th):
         for x in starts(W, tw):
             region = (slice(y, y + th), slice(x, x + tw))
@@ -155,7 +156,21 @@ def refine(canvas: np.ndarray, mask: np.ndarray, inpaint, prompt: str, negative:
                 continue
             out = inpaint(canvas[region].copy(), (m * 255).astype(np.uint8), prompt, negative,
                           seed + n, steps=steps, denoise=denoise, touch_up=True)
-            _paste(canvas, region, out, m)
+            # Fade towards the tile's edges inside the canvas, so overlapping tiles
+            # blend (round 2c: each pasted to its edge and left rectangles).
+            ramp_y = np.ones(th, np.float32)
+            ramp_x = np.ones(tw, np.float32)
+            r = np.minimum(np.arange(th) + 1, fade) / fade
+            if y > 0:
+                ramp_y = np.minimum(ramp_y, r)
+            if y + th < H:
+                ramp_y = np.minimum(ramp_y, r[::-1])
+            r = np.minimum(np.arange(tw) + 1, fade) / fade
+            if x > 0:
+                ramp_x = np.minimum(ramp_x, r)
+            if x + tw < W:
+                ramp_x = np.minimum(ramp_x, r[::-1])
+            _paste(canvas, region, out, m.astype(np.float32) * ramp_y[:, None] * ramp_x[None, :])
             n += 1
     return n
 
@@ -215,20 +230,33 @@ def extend_side(src: np.ndarray, cut: list[str], grow: float, long_side: float, 
     canvas = src.copy()
     body = segment(src)
     her = prompts.subject_prompt(list(subject_tags), list(fill_tags), where, 0.0, quality)
-    scene_p = prompts.view_prompt(list(fill_tags), where, 0.0, quality)
-    scene_n = prompts.view_negative(prompts.NEGATIVE, where, 0.0)
+    #: A band below the picture is floor or ground, one above it ceiling or sky
+    #: (round 2c: the band under Fubuki's sofa became a stack of new rooms).
+    pitch_of = {"bottom": -45.0, "top": 45.0, "left": 0.0, "right": 0.0}
     passes = []
     n = 0
     from .widen import _fan
     while active and n < max_steps:
         for side in list(active):
             size = h if side in ("top", "bottom") else w
-            inc = min(int(step * size), limit[side] - add[side])
+            old, old_body = canvas, body
+            oh, ow = old.shape[:2]
+            # Where the body crosses this edge, and how wide the crossing is.
+            at_edge = np.zeros((oh, ow), bool)
+            at_edge[_edge_rows(side, at_edge)] = True
+            crossing = old_body & at_edge
+            ys, xs = np.nonzero(crossing)
+            along = xs if side in ("top", "bottom") else ys
+            span = int(along.max() - along.min() + 1) if crossing.sum() >= 4 else 0
+            # A body crossing grows only as far as its fan reaches, 1.5x the crossing's
+            # width (round 2c: a foot on the source's right edge got a full step with
+            # her tags, and a second Fubuki in it); so reaching the new edge still
+            # means the body goes on. No crossing: one step of scenery, then stop.
+            inc = int(step * size) if span == 0 else int(np.clip(1.5 * span, 48, step * size))
+            inc = min(inc, limit[side] - add[side])
             if inc < 16:
                 active.remove(side)
                 continue
-            old, old_body = canvas, body
-            oh, ow = old.shape[:2]
             add[side] += inc
             W, H, x0, y0 = canvas_geometry(w, h, add)
             dx = inc if side == "left" else 0
@@ -241,20 +269,18 @@ def extend_side(src: np.ndarray, cut: list[str], grow: float, long_side: float, 
             prev = np.zeros((H, W), bool)
             prev[dy:dy + oh, dx:dx + ow] = old_body
             band = ~known
-            # Where the body crosses the old edge, and a fan from there into the band.
-            rows = _edge_rows(side, np.zeros((oh, ow)))
-            at_edge = np.zeros((oh, ow), bool)
-            at_edge[rows] = True
+            # A fan from where the body crosses the old edge, across the band.
             edge = np.zeros((H, W), np.uint8)
-            edge[dy:dy + oh, dx:dx + ow] = (old_body & at_edge).astype(np.uint8)
+            edge[dy:dy + oh, dx:dx + ow] = crossing.astype(np.uint8)
             d = {"bottom": "down", "top": "up", "left": "left", "right": "right"}[side]
-            zone = (_fan(edge, d, inc, max(8, inc // 12), math.tan(math.radians(12)))
-                    if edge.sum() >= 4 else np.zeros((H, W), bool)) & band
+            zone = (_fan(edge, d, inc, max(8, span // 8), math.tan(math.radians(12)))
+                    if span else np.zeros((H, W), bool)) & band
             rest = band & ~zone
             region = _window(side, W, H, dx, dy, ow, oh, max(256, int(0.6 * inc)))
             jobs = [(zone, her, prompts.SUBJECT_NEGATIVE)]
-            if scene_of is None:
-                jobs.append((rest, scene_p, scene_n))       # scenery, no people
+            if scene_of is None:                            # scenery, no people
+                jobs.append((rest, prompts.view_prompt(list(fill_tags), where, pitch_of[side], quality),
+                             prompts.view_negative(prompts.NEGATIVE, where, pitch_of[side])))
             painted = []
             for k, (todo, prompt, negative) in enumerate(jobs):
                 m = todo[region]
@@ -297,7 +323,9 @@ def extend_side(src: np.ndarray, cut: list[str], grow: float, long_side: float, 
         # The body and its surroundings with her tags; the rest as scenery.
         tiles = refine(canvas, todo & near_body, inpaint, her, prompts.SUBJECT_NEGATIVE,
                        seed + 500, refine_denoise, steps=steps)
-        tiles += refine(canvas, todo & ~near_body, inpaint, scene_p, scene_n,
+        tiles += refine(canvas, todo & ~near_body, inpaint,
+                        prompts.view_prompt(list(fill_tags), where, 0.0, quality),
+                        prompts.view_negative(prompts.NEGATIVE, where, 0.0),
                         seed + 700, refine_denoise, steps=steps)
         # Inside the rim, the source stays exactly as it was.
         canvas[y0 + rim:y0 + h - rim, x0 + rim:x0 + w - rim] = src[rim:h - rim, rim:w - rim]

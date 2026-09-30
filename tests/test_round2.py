@@ -51,14 +51,16 @@ def test_extend_side_keeps_the_source_and_lands_it_where_it_was():
     g = grow.extend_side(src, ["bottom"], 0.6, 60.0, fake, ("1girl",), ["indoors"], "indoors",
                          seed=1, refine_denoise=0.35, step=0.3, segment=her_segment(src))
     x0, y0, w, h = g.rect
-    assert (x0, y0) == (0, 0) and g.log["added"] == {"bottom": 2 * int(0.3 * 608)}
-    assert [p["added"] for p in g.log["passes"]] == [182, 182]
+    assert (x0, y0) == (0, 0) and g.log["added"] == {"bottom": int(0.6 * 608)}
+    # Her legs cross the edge 83 px wide: the first step reaches 1.5x that, not a
+    # full step; later steps follow the (fake, fan-shaped) body as it widens.
+    assert g.log["passes"][0]["added"] == 124 and len(g.log["passes"]) == 3
     rim = g.log["rim"]
     assert np.array_equal(g.image[rim:h - rim, rim:w - rim], src[rim:h - rim, rim:w - rim])
     gen = [c for c in fake.calls if not c["touch_up"]]
     ref = [c for c in fake.calls if c["touch_up"]]
     # Each step: her fan with her tags, then the rest of the band as scenery.
-    assert [c["her"] for c in gen] == [True, False, True, False]
+    assert [c["her"] for c in gen] == [True, False] * 3
     assert all(c["control"] for c in gen)
     assert all("no humans" in c["prompt"] for c in gen if not c["her"])
     assert ref and all(c["denoise"] == 0.35 and not c["control"] for c in ref)
