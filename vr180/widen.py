@@ -13,6 +13,10 @@ The rules V.0's trial and the author's verdict set:
 - **A plain background is extended, not generated**: its views take the colour
   from the edge, with no diffusion to invent objects on it (V.1's plain sources
   grew strange shapes at the subject's feet).
+- **A body, once painted, is kept** (``join="hard"``, round 1 of the outpaint
+  work): later views may not repaint or cross-fade over it. The 0.4.0 blend let a
+  scene view paint floor over a continued leg, and its 32 px cross-fade left a
+  see-through ghost where two views disagreed (V.2's outputs 001-003, 007).
 - **Only what VR180 shows is generated**: the front hemisphere plus a margin for
   the second eye. The back of the sphere is a cheap blur, there only so the depth
   model has something plausible on the faces it reads.
@@ -35,7 +39,9 @@ from . import plan, prompts, sphere, subject
 class Inpainter(Protocol):
     def __call__(self, image: np.ndarray, mask: np.ndarray, prompt: str, negative: str,
                  seed: int, control: np.ndarray | None = None,
-                 reference: np.ndarray | None = None, steps: int | None = None) -> np.ndarray: ...
+                 reference: np.ndarray | None = None, steps: int | None = None,
+                 **kw) -> np.ndarray: ...
+    # ``denoise=`` is passed only over a layout (``widen(layout=...)``).
 
 
 #: ``segment(rgb) -> bool mask`` of the subject, or None to skip subject handling.
@@ -68,6 +74,15 @@ class Options:
     taper_steps: tuple = ((40.0, 28), (60.0, 22), (80.0, 16), (100.0, 12))
     taper_far_deg: float = 60.0      # beyond this, a view renders at taper_far_px
     taper_far_px: int = 768
+    #: "blend" is 0.4.0's join; "hard" keeps a painted body (never repainted or
+    #: cross-faded), blends scene joins over ``hard_seam_px`` only, fans the
+    #: continuation zone out by ``zone_spread_deg`` so a bending limb stays inside
+    #: it, and grows the body with ``grow_segment`` (a lower threshold).
+    join: str = "blend"
+    hard_seam_px: int = 8
+    zone_spread_deg: float = 30.0
+    #: Over a layout (S2), how much a scene view may change it.
+    layout_denoise: float = 0.7
 
 
 @dataclass
@@ -105,7 +120,8 @@ def taper_for(off_deg: float, kind: str, opt: "Options") -> tuple[int, int]:
 
 
 def continuation_zone(subj_known: np.ndarray, unknown: np.ndarray, hole: np.ndarray,
-                      S: int, source: np.ndarray | None = None) -> np.ndarray | None:
+                      S: int, source: np.ndarray | None = None,
+                      spread_deg: float = 0.0) -> np.ndarray | None:
     """Where a view continues the subject: the empty pixels just past its cut edge,
     extruded *outward* from the side of the frame that cut it (legs cut at the
     bottom continue downward, within the body's width plus a small margin). The
@@ -136,6 +152,9 @@ def continuation_zone(subj_known: np.ndarray, unknown: np.ndarray, hole: np.ndar
         e = (edge & empty_that_way).astype(np.uint8)
         if e.sum() < 4:
             continue
+        if spread_deg > 0:
+            zone |= _fan(e, d, r, max(4, r // 4), math.tan(math.radians(spread_deg)))
+            continue
         # A one-sided kernel: OpenCV's dilation extends *opposite* to where the
         # kernel's ones lie (ones in the top half reach down; checked in V.1).
         line = np.zeros(2 * r + 1, np.uint8)
@@ -151,6 +170,43 @@ def continuation_zone(subj_known: np.ndarray, unknown: np.ndarray, hole: np.ndar
         zone |= ext > 0
     zone &= hole
     return zone if zone.any() else None
+
+
+def _shift(a: np.ndarray, n: int, d: str) -> np.ndarray:
+    """``a`` moved ``n`` pixels towards ``d``, the vacated rim empty."""
+    if n == 0:
+        return a.copy()
+    out = np.zeros_like(a)
+    if d == "down":
+        out[n:] = a[:-n]
+    elif d == "up":
+        out[:-n] = a[n:]
+    elif d == "right":
+        out[:, n:] = a[:, :-n]
+    else:
+        out[:, :-n] = a[:, n:]
+    return out
+
+
+def _fan(e: np.ndarray, d: str, r: int, m: int, tan: float) -> np.ndarray:
+    """A fan extruded from the edge pixels ``e`` towards ``d``: ``r`` deep, ``m``
+    either side at the root, widening by ``tan`` per pixel of depth. Round 1 of the
+    outpaint work: 0.4.0's straight strip cut off a limb that bent or angled, and
+    the scene pass painted over what left it."""
+    out = np.zeros(e.shape, np.uint8)
+    step = max(2, r // 32)
+    for depth in range(0, r + 1, step):
+        half = int(round(m + depth * tan))
+        k = np.ones((1, 2 * half + 1) if d in ("down", "up") else (2 * half + 1, 1), np.uint8)
+        out |= _shift(cv2.dilate(e, k), depth, d)
+    # Close the gaps between the sampled depths: a short one-sided line.
+    line = np.zeros(2 * step + 1, np.uint8)
+    if d in ("down", "right"):
+        line[:step + 1] = 1
+    else:
+        line[step:] = 1
+    k = line[:, None] if d in ("down", "up") else line[None, :]
+    return cv2.dilate(out, k) > 0
 
 
 def _feather(gen_mask: np.ndarray, unknown: np.ndarray, seam_px: int) -> np.ndarray:
@@ -256,15 +312,24 @@ def fill_back(pano: np.ndarray, known: np.ndarray) -> np.ndarray:
 
 def widen(src: np.ndarray, fill_tags: list[str], inpaint: Inpainter, opt: Options,
           work: Path | None = None, say: Callable[[str], None] = print,
-          segment: Segment | None = None) -> Result:
+          segment: Segment | None = None, grow_segment: Segment | None = None,
+          layout: np.ndarray | None = None) -> Result:
+    """``layout`` (S2): an equirect the size of the panorama whose front is a
+    coarse fill of the whole scene from one generation (``vr180.layout``). Given,
+    each scene view starts from it instead of a blur and changes it only by
+    ``opt.layout_denoise``, so the views agree on where the room's walls, bed and
+    horizon are. A body's continuation zone still starts from the blur."""
     t_all = time.time()
+    hard = opt.join == "hard"
+    grow = grow_segment if (hard and grow_segment is not None) else segment
     pano, src_mask, (hfov, vfov) = sphere.place(src, opt.width, opt.long_side)
     source = src_mask > 0
     known = source.copy()
     where, why = prompts.setting(fill_tags)
     planner = plan.Planner(opt.view_fov, opt.target_deg, max_new=opt.max_new)
     log = {"hfov": round(hfov, 2), "vfov": round(vfov, 2), "setting": where,
-           "setting_why": why, "fill_tags": fill_tags, "views": []}
+           "setting_why": why, "fill_tags": fill_tags, "views": [], "join": opt.join,
+           "layout": layout is not None}
     # The subject, on the sphere: from the source, then from every view that
     # continued it, so the next view down still knows the legs belong to it.
     subj = np.zeros(source.shape, bool)
@@ -300,7 +365,7 @@ def widen(src: np.ndarray, fill_tags: list[str], inpaint: Inpainter, opt: Option
         pre_kind = "subject" if subject.touches(sq, ~kq, reach_px=12) else "scene"
         off = off_centre_deg(v.yaw, v.pitch)
         steps, S = taper_for(off, pre_kind, opt)
-        seam_px = max(4, int(round(opt.seam_px * S / opt.view_px)))
+        seam_px = max(4, int(round((opt.hard_seam_px if hard else opt.seam_px) * S / opt.view_px)))
         view = sphere.view_of(pano, v.yaw, v.pitch, F, S)
         kv = sphere.view_of((known * 255).astype(np.uint8), v.yaw, v.pitch, F, S,
                             cv2.INTER_NEAREST) > 127
@@ -312,9 +377,20 @@ def widen(src: np.ndarray, fill_tags: list[str], inpaint: Inpainter, opt: Option
         band = np.ones((2 * seam_px + 1,) * 2, np.uint8)
         gen_mask = cv2.dilate(unknown.astype(np.uint8) * 255, band)
         gen_mask[sv] = 0
-        seeded = _seed(view, unknown)
         subj_v = sphere.view_of((subj * 255).astype(np.uint8), v.yaw, v.pitch, F, S,
                                 cv2.INTER_NEAREST) > 127
+        subj_before = subj.copy()
+        if hard:
+            # A painted body is never repainted: its mask grown a pixel over what is
+            # known, as the body's colours resample a pixel past its nearest-sampled mask.
+            body = cv2.dilate((subj_v & kv).astype(np.uint8), np.ones((3, 3), np.uint8)) > 0
+            gen_mask[body & kv] = 0
+        seeded = _seed(view, unknown)
+        laid = None
+        if layout is not None:
+            lv = sphere.view_of(layout, v.yaw, v.pitch, F, S)
+            laid = view.copy()
+            laid[unknown] = lv[unknown]
         kind = ("subject" if subject.touches(subj_v, unknown, reach_px=max(12, 48 * S // 1024))
                 else "plain" if where == "plain" and opt.plain_fill else "scene")
         if kind == "subject" and pre_kind != "subject" and opt.taper:
@@ -352,7 +428,8 @@ def widen(src: np.ndarray, fill_tags: list[str], inpaint: Inpainter, opt: Option
             ahead = None
             grown_a = None
             if kind == "subject":
-                zone = continuation_zone(subj_v & kv, unknown, gen_mask > 0, S)
+                zone = continuation_zone(subj_v & kv, unknown, gen_mask > 0, S,
+                                         spread_deg=opt.zone_spread_deg if hard else 0.0)
             if zone is not None and zone.any():
                 # Two passes (V.1: a view that only grazed the character was given her
                 # tags for its whole hole, and painted her again). Her tags paint only
@@ -363,13 +440,14 @@ def widen(src: np.ndarray, fill_tags: list[str], inpaint: Inpainter, opt: Option
                 gen = inpaint(seeded, zmask, prompt, negative, opt.seed + n,
                               control=control, reference=ref, steps=steps)
                 rest = (gen_mask > 0) & ~zone
-                if segment is not None:
+                if grow is not None:
                     # Where the body painted in the zone runs into the zone's far edge,
                     # keep the strip beyond it empty for the next view to continue.
                     # V.1: pass 2 filled it with scene, and the body stopped short.
-                    grown_a = segment(gen) & zone
+                    grown_a = grow(gen) & zone
                     if grown_a.any():
-                        ahead = continuation_zone(grown_a, rest, rest, S)
+                        ahead = continuation_zone(grown_a, rest, rest, S,
+                                                  spread_deg=opt.zone_spread_deg if hard else 0.0)
                         if ahead is not None:
                             rest &= ~ahead
                 if where == "plain" and opt.plain_fill:
@@ -379,20 +457,28 @@ def widen(src: np.ndarray, fill_tags: list[str], inpaint: Inpainter, opt: Option
                     scene_negative = prompts.view_negative(opt.negative, where, v.pitch)
                     control = gen.copy()
                     control[rest] = 0
-                    gen = inpaint(gen, (rest * 255).astype(np.uint8), scene_prompt,
+                    init, extra = gen, {}
+                    if laid is not None:
+                        init = gen.copy()
+                        init[rest & unknown] = laid[rest & unknown]
+                        extra = {"denoise": opt.layout_denoise}
+                    gen = inpaint(init, (rest * 255).astype(np.uint8), scene_prompt,
                                   scene_negative, opt.seed + n + 1000, control=control,
-                                  reference=ref, steps=steps)
+                                  reference=ref, steps=steps, **extra)
                     prompt = prompt + "  ||  " + scene_prompt
             else:
                 control = seeded.copy()
                 control[gen_mask > 0] = 0    # NoobAI Inpainting: the hole pure black
-                gen = inpaint(seeded, gen_mask, prompt, negative, opt.seed + n,
-                              control=control, reference=ref, steps=steps)
+                init, extra = seeded, {}
+                if laid is not None and kind == "scene":
+                    init, extra = laid, {"denoise": opt.layout_denoise}
+                gen = inpaint(init, gen_mask, prompt, negative, opt.seed + n,
+                              control=control, reference=ref, steps=steps, **extra)
         secs = time.time() - t0
-        if kind == "subject" and segment is not None:
+        if kind == "subject" and grow is not None:
             # Grow the subject only from the continuation zone, so a stray figure
             # elsewhere can never be adopted as the subject and carried on.
-            grown = grown_a if grown_a is not None else segment(gen) & (gen_mask > 0)
+            grown = grown_a if grown_a is not None else grow(gen) & (gen_mask > 0)
             if zone is not None:
                 grown &= zone
             if grown.any():
@@ -410,7 +496,10 @@ def widen(src: np.ndarray, fill_tags: list[str], inpaint: Inpainter, opt: Option
         img, cover = sphere.back_project(gen, v.yaw, v.pitch, F, opt.width, region=region)
         ws, _ = sphere.back_project(w, v.yaw, v.pitch, F, opt.width,
                                    interp=cv2.INTER_LINEAR, region=region)
-        ws = np.where(cover & ~source[rows][:, cols], np.clip(ws, 0, 1), 0).astype(np.float32)
+        keep = source[rows][:, cols]
+        if hard:
+            keep = keep | subj_before[rows][:, cols]
+        ws = np.where(cover & ~keep, np.clip(ws, 0, 1), 0).astype(np.float32)
         sub = pano[rows][:, cols]
         pano[rows, cols] = (sub * (1 - ws[..., None]) + img * ws[..., None]).round().astype(np.uint8)
         known[rows, cols] |= ws > 0.5

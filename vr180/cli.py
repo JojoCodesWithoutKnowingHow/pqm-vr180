@@ -18,7 +18,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from . import __version__, forge, placement, post, prompts, stereo, widen
+from . import __version__, flatext, forge, layout, placement, post, prompts, sphere, stereo, widen
 
 SEG_MODEL = "/workspace/models/anime-seg/isnetis.onnx"
 DEPTH_MODELS = {"any-b": ["--depth-backend", "depth-anything"],
@@ -110,6 +110,27 @@ def parse(argv=None):
                    help="the venv with MoGe-2, for --long-side moge")
     p.add_argument("--stereo-dir", default="/workspace/stereo360")
     p.add_argument("--pano-only", action="store_true", help="stop before stereo")
+    # The outpaint work (round 1): each off by default until judged in the headset.
+    p.add_argument("--join", choices=("blend", "hard"), default="blend",
+                   help="blend: 0.4.0 (a 32 px cross-fade into earlier fill, a painted body "
+                        "may be repainted). hard: a painted body is kept, scene joins blend over "
+                        "8 px, the body's zone fans out, and it grows at --grow-threshold")
+    p.add_argument("--zone-spread", type=float, default=30.0,
+                   help="with --join hard: degrees the continuation zone widens by")
+    p.add_argument("--grow-threshold", type=float, default=0.3,
+                   help="with --join hard: anime-seg threshold for a continued body (0.5 finds "
+                        "a torso but often not a lone limb)")
+    p.add_argument("--flat-extend", type=float, default=0.0, metavar="F",
+                   help="finish a body the frame cuts off on the flat picture first: grow the "
+                        "canvas F times along each cut axis, symmetrically, in one inpaint "
+                        "(0: off). Needs --subject-tags")
+    p.add_argument("--layout", choices=("none", "fisheye"), default="none",
+                   help="fisheye: lay the whole front out in one generation first, then refine "
+                        "each scene view over it at --layout-denoise")
+    p.add_argument("--layout-denoise", type=float, default=0.7)
+    p.add_argument("--layout-deg", type=float, default=100.0,
+                   help="the layout fisheye reaches this far off straight ahead")
+    p.add_argument("--layout-px", type=int, default=1024)
     return p.parse_args(argv)
 
 
@@ -150,16 +171,19 @@ def main(argv=None) -> int:
         print("not ready: " + "; ".join(missing), file=sys.stderr)
         return 2
 
-    def inpaint(image, mask, prompt, negative, seed, control=None, reference=None, steps=None):
+    def inpaint(image, mask, prompt, negative, seed, control=None, reference=None, steps=None,
+                denoise=None):
         return f.inpaint(image, mask, prompt, negative, seed, s, control=control,
-                         reference=reference, steps=steps)
+                         reference=reference, steps=steps, denoise=denoise)
 
     opt = widen.Options(width=a.width, target_deg=a.target,
                         max_new=a.max_new, seed=a.seed, quality=a.quality,
                         negative=a.negative, subject_tags=subject_tags,
                         plain_fill=not a.no_plain_fill, prompt_mode=a.prompt_mode,
                         reference=a.reference and a.method == "noob",
-                        steps=a.steps, taper=a.taper, view_fov=a.view_fov, view_px=a.view_px)
+                        steps=a.steps, taper=a.taper, view_fov=a.view_fov, view_px=a.view_px,
+                        join=a.join, zone_spread_deg=a.zone_spread,
+                        layout_denoise=a.layout_denoise)
     src = np.array(Image.open(a.src).convert("RGB"))
     h, w = src.shape[:2]
     if a.long_side == "ratio":
@@ -180,24 +204,55 @@ def main(argv=None) -> int:
         long_side, why = placement.by_camera(w, h, est)
     else:
         long_side, why = float(a.long_side), "given"
-    opt.long_side = long_side
     print("placement: %.1f deg (%s)" % (long_side, why))
     t0 = time.time()
-    r = widen.widen(src, tags, inpaint, opt, work, segment=segment)
-    seam = {"ratio_before": round(post.detail_ratio(r.pano, r.source_mask > 0), 3)}
+    where = prompts.setting(tags)[0]
+    ref = src if (a.reference and a.method == "noob") else None
+    extra_log = {}
+    picture, picture_long = src, long_side
+    orig_mask = None
+    if a.flat_extend > 0 and segment is not None and subject_tags:
+        cut = widen._cut_edges(segment(src))
+        ext = flatext.extend(src, cut, a.flat_extend, inpaint, subject_tags, tags, where,
+                             a.seed + 5000, quality=a.quality, reference=ref, steps=a.steps)
+        if ext is not None:
+            picture = ext.image
+            picture_long = flatext.ext_long_side(w, h, long_side, *ext.image.shape[1::-1])
+            placed, _m, _f = sphere.place(ext.source_mask(), a.width, picture_long)
+            orig_mask = ((placed > 127) & (_m > 0)).astype(np.uint8) * 255
+            Image.fromarray(picture).save(work / "flat_extended.png")
+            extra_log["flat_extend"] = dict(ext.log, long_side=round(picture_long, 2))
+            print("flat extend: cut at %s, canvas %s, long side %.1f deg"
+                  % (", ".join(cut), ext.log["canvas"], picture_long))
+        else:
+            extra_log["flat_extend"] = {"skipped": "the frame cuts no subject"}
+    opt.long_side = picture_long
+    grow_segment = None
+    if segment is not None:
+        grow_segment = lambda img: segment(img, threshold=a.grow_threshold)  # noqa: E731
+    lay = None
+    if a.layout == "fisheye":
+        pano0, m0, _f = sphere.place(picture, a.width, picture_long)
+        lay, extra_log["layout"] = layout.make_layout(
+            pano0, m0 > 0, tags, where, inpaint, a.seed + 7000, max_deg=a.layout_deg,
+            S=a.layout_px, quality=a.quality, reference=ref, steps=a.steps, work=work)
+    r = widen.widen(picture, tags, inpaint, opt, work, segment=segment,
+                    grow_segment=grow_segment, layout=lay)
+    src_mask = orig_mask if orig_mask is not None else r.source_mask
+    seam = {"ratio_before": round(post.detail_ratio(r.pano, src_mask > 0), 3)}
     if a.detail_match:
-        r.pano, seam["detail_amount"] = post.detail_match(r.pano, r.source_mask > 0)
+        r.pano, seam["detail_amount"] = post.detail_match(r.pano, src_mask > 0)
     if a.soften_rim:
-        r.pano = post.soften_rim(r.pano, r.source_mask > 0, a.soften_rim)
+        r.pano = post.soften_rim(r.pano, src_mask > 0, a.soften_rim)
         seam["rim_px"] = a.soften_rim
-    seam["ratio_after"] = round(post.detail_ratio(r.pano, r.source_mask > 0), 3)
+    seam["ratio_after"] = round(post.detail_ratio(r.pano, src_mask > 0), 3)
     Image.fromarray(r.pano).save(work / "pano.png")
-    Image.fromarray(r.source_mask).save(work / "source_mask.png")
+    Image.fromarray(src_mask).save(work / "source_mask.png")
     log = {"version": __version__, "src": a.src, "argv": sys.argv[1:] if argv is None else argv,
            "method": a.method, "cn_model": s.cn_model, "ipa_model": s.ipa_model,
            "checkpoint": a.checkpoint, "denoise": denoise,
            "placement": {"long_side": long_side, "why": why}, "depth_model": a.depth_model,
-           "seam": seam,
+           "seam": seam, **extra_log,
            "widen": r.log}
     if not a.pano_only:
         log["stereo"] = []
