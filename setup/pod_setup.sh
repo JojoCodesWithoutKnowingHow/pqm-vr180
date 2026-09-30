@@ -63,8 +63,16 @@ fetch() {  # fetch "dest|url|sha256": download unless already there and verified
     echo "have $(basename "$dest")"; return
   fi
   t0=$(date +%s)
-  curl -sSL --fail -o "$dest.part" "$url"
-  echo "$sha  $dest.part" | sha256sum -c --quiet -
+  # Retried: a dropped HTTP/2 stream (curl 92) failed a whole pod's setup once
+  # (outpaint round 1); curl resumes the .part, and a bad hash starts it over.
+  local try
+  for try in 1 2 3; do
+    curl -sSL --fail --retry 5 --retry-all-errors --retry-delay 3 -C - -o "$dest.part" "$url" \
+      && echo "$sha  $dest.part" | sha256sum -c --quiet - && break
+    echo "fetch $(basename "$dest") try $try failed"
+    rm -f "$dest.part"
+    [ "$try" = 3 ] && return 1
+  done
   mv "$dest.part" "$dest"
   echo "$(basename "$dest") in $(( $(date +%s) - t0 ))s"
 }
