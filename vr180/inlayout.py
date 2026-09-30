@@ -195,6 +195,24 @@ def redraw(canvas: np.ndarray, rect, sides, segment, inpaint, prompt: str, negat
             "masked_px": int(m.sum())}
 
 
+def adetail_restore(canvas: np.ndarray, rect, src: np.ndarray, segment, inpaint, prompt: str,
+                    seed: int, denoise: float, steps: int | None = None, fade: int = 32,
+                    limit: np.ndarray | None = None) -> dict:
+    """``adetail`` over her whole figure, then the source faded back in over
+    ``fade`` px inside its rectangle (round 17's order). In place; the log."""
+    x0, y0, w, h = rect
+    log = adetail(canvas, rect, segment, inpaint, prompt, prompts.SUBJECT_NEGATIVE, seed,
+                  denoise, steps=steps, limit=limit)
+    inside = np.zeros(canvas.shape[:2], np.uint8)
+    inside[y0:y0 + h, x0:x0 + w] = 1
+    ws = np.clip(cv2.distanceTransform(inside, cv2.DIST_L2, 5)[y0:y0 + h, x0:x0 + w] / fade,
+                 0, 1)[..., None]
+    reg = canvas[y0:y0 + h, x0:x0 + w].astype(np.float32)
+    canvas[y0:y0 + h, x0:x0 + w] = (src.astype(np.float32) * ws + reg * (1 - ws)
+                                    ).round().astype(np.uint8)
+    return log
+
+
 def adetail(canvas: np.ndarray, rect, segment, inpaint, prompt: str, negative: str, seed: int,
             denoise: float, steps: int | None = None, budget: int = 1280 * 1024,
             limit: np.ndarray | None = None) -> dict:

@@ -786,3 +786,57 @@ def test_redraw_skips_without_a_body_outside_the_source():
                           lambda rgb, threshold=0.5: person, fake, "1girl", "", seed=1,
                           denoise=0.6)
     assert fake.calls == [] and "skipped" in log
+
+
+def test_extend_guided_redraws_her_body_from_the_layout_at_the_guide():
+    # Round 29: each step's body redrawn at ``guide`` from the laid-out scene (no
+    # hole, no inpaint ControlNet); the scenery stays the layout's.
+    from vr180 import grow
+    src = checker(416, 608)
+    fake = ColourForge()
+    seg = her_segment(src)
+    grey = lambda W, H, cx, cy: np.full((H, W, 3), 128, np.uint8)   # noqa: E731
+    g = grow.extend_side(src, ["bottom"], 0.6, 60.0, fake, ["1girl"], ["room"], None, seed=1,
+                         segment=seg, scene_of=grey, refine_denoise=0.0, guide=0.5)
+    assert g is not None and g.log["guide"] == 0.5
+    body_calls = [c for c in fake.calls if c["her"]]
+    assert body_calls and all(c["touch_up"] and c["denoise"] == 0.5 and not c["control"]
+                              for c in body_calls)
+    assert all(c["her"] for c in fake.calls)            # no scenery pass: the layout stays
+
+
+def test_cli_extend_guided_draws_her_in_the_layout_then_grows_her_from_the_edge(tmp_path,
+                                                                                monkeypatch):
+    from vr180 import cli, forge, subject
+    src = checker(416, 608)
+    Image.fromarray(src).save(tmp_path / "src.png")
+    seg_model = tmp_path / "seg.onnx"
+    seg_model.write_bytes(b"x")
+    fake = ColourForge()
+
+    class FakeSeg:
+        def __init__(self, path):
+            self.fn = her_segment(src)
+
+        def __call__(self, rgb, threshold=0.5):
+            return self.fn(rgb, threshold)
+
+    monkeypatch.setattr(subject, "Segmenter", FakeSeg)
+    monkeypatch.setattr(forge.Forge, "resolve", lambda self, s: [])
+    monkeypatch.setattr(forge.Forge, "inpaint",
+                        lambda self, image, mask, prompt, negative, seed, s, **kw:
+                        fake(image, mask, prompt, negative, seed, **kw))
+    rc = cli.main([str(tmp_path / "src.png"), "-o", str(tmp_path / "o_180_LR.jpg"), "--checkpoint",
+                   "c", "--tags", "indoors, room", "--subject-tags", "1girl, skirt",
+                   "--subject-framing", "sitting, cowboy shot", "--long-side", "60",
+                   "--width", "1024", "--view-px", "256", "--segment-model", str(seg_model),
+                   "--pano-only", "--join", "hard", "--extend-side", "0.6", "--extend-guided",
+                   "0.5", "--extend-refine", "0.35", "--layout", "fisheye", "--layout-px", "256",
+                   "--layout-hires", "512", "--compose", "0", "--seam-repaint", "0.4",
+                   "--soften-rim", "0", "--adetail", "0.27"])
+    assert rc == 0
+    log = json.loads((tmp_path / "o_180_LR.work" / "log.json").read_text(encoding="utf-8"))
+    lp = log["layout"]["prompt"]
+    assert "1girl" in lp and "sitting" in lp and "cowboy shot" not in lp
+    assert log["extend_side"]["guide"] == 0.5 and log["extend_side"]["order"] == "scene-first"
+    assert "adetail" in log

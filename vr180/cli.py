@@ -161,6 +161,14 @@ def parse(argv=None):
                    help="the source's pose and framing words (e.g. 'sitting, crossed legs, "
                         "cowboy shot'); with --extend-regional they go into her region's prompt "
                         "so it knows where her body ends (round 7)")
+    p.add_argument("--extend-guided", type=float, default=0.0, metavar="D",
+                   help="round 29 (the author's pick), with --extend-side and --layout fisheye: "
+                        "the layout is drawn first with the full prompt (L's), then her body is "
+                        "grown stepwise from the source's edge (J's extension), each step "
+                        "redrawn at D from the layout's own pixels -- her pose and feet from "
+                        "the layout, the join at the source's resolution (r28: the layout "
+                        "alone breaks at the source's edge, a latent cell there ~30 px here); "
+                        "use with --adetail")
     p.add_argument("--redraw", type=float, default=0.0, metavar="D",
                    help="round 26, with --extend-in-layout: before ADetailer, redraw her body "
                         "outside the source (and 32 px into it at each cut edge) at D from the "
@@ -245,6 +253,16 @@ def _strength_out(out: Path, value: str, first: bool) -> Path:
     stem = out.stem[:-len("_180_LR")] if out.stem.endswith("_180_LR") else out.stem
     return out.with_name("%s_s%s_180_LR%s" % (stem, value, out.suffix))
 
+
+
+def _full_prompt(a, subject_tags, tags, where) -> str:
+    """The layout's full prompt (round 18, L): the lens words, her tags (less
+    ``--layout-omit``), her pose words and the scene."""
+    lens = ["(fisheye:1.3)", "fisheye lens"] if a.layout_strong else ["fisheye"]
+    omit = {t.lower() for t in prompts.split_tags(a.layout_omit)}
+    return prompts.subject_prompt(lens + [t for t in subject_tags if t.lower() not in omit]
+                                  + prompts.pose_words(a.subject_framing),
+                                  tags, where, 0.0, a.quality)
 
 def main(argv=None) -> int:
     a = parse(argv)
@@ -390,14 +408,7 @@ def main(argv=None) -> int:
                 her_p = prompts.subject_prompt(lens + list(subject_tags) + framing, tags, where,
                                                0.0, a.quality)
                 region = (her_p, her_f)
-        full_p = None
-        if a.layout_full_prompt:
-            lens = ["(fisheye:1.3)", "fisheye lens"] if a.layout_strong else ["fisheye"]
-            omit = {t.lower() for t in prompts.split_tags(a.layout_omit)}
-            full_p = prompts.subject_prompt(lens + [t for t in subject_tags
-                                                    if t.lower() not in omit]
-                                            + prompts.pose_words(a.subject_framing),
-                                            tags, where, 0.0, a.quality)
+        full_p = _full_prompt(a, subject_tags, tags, where) if a.layout_full_prompt else None
         lay, extra_log["layout"], fish = layout.make_layout(
             pano0, m0 > 0, tags, where, inpaint, a.seed + 7000, return_fisheye=True,
             region=region, full_prompt=full_p,
@@ -424,11 +435,17 @@ def main(argv=None) -> int:
             extra_log["extend_in_layout"] = {"skipped": "the frame cuts no subject", "cut": cut}
     elif a.extend_side > 0 and seg_src is not None:
         scene_of = None
-        if a.order == "scene-first" and a.layout == "fisheye":
+        if (a.order == "scene-first" or a.extend_guided > 0) and a.layout == "fisheye":
             # The author's order: the scene first, then the body painted over it.
+            # Guided (round 29): the layout draws her too, with the full prompt.
             pano0, m0, _f = centred(src)
+            gkw = {}
+            if a.extend_guided > 0:
+                gkw = dict(full_prompt=_full_prompt(a, subject_tags, tags, where),
+                           full_negative=(prompts.CLOSE_NEGATIVE + ", " + prompts.SUBJECT_NEGATIVE
+                                          if a.layout_close_negative else None))
             lay, extra_log["layout"] = layout.make_layout(pano0, m0 > 0, tags, where, inpaint,
-                                                          a.seed + 7000, **lay_kw)
+                                                          a.seed + 7000, **gkw, **lay_kw)
             f0 = grow.focal(w, h, long_side)
 
             def scene_of(cw, ch, cx, cy, lay=lay, f0=f0):
@@ -438,7 +455,7 @@ def main(argv=None) -> int:
             src, cut, a.extend_side, long_side, inpaint, ext_tags, tags, where, a.seed + 5000,
             quality=a.quality, reference=ref, steps=a.steps, max_deg=a.extend_max_deg,
             refine_denoise=a.extend_refine, step=a.extend_step, segment=segment,
-            scene_of=scene_of)
+            scene_of=scene_of, guide=a.extend_guided)
         if g is not None:
             picture = g.image
             grown_g = g
@@ -450,6 +467,11 @@ def main(argv=None) -> int:
                 return body_mask if img.shape[:2] == body_mask.shape else segment(img)
 
             place, orig_mask = grown_place(g), source_in(g)
+            if a.extend_guided > 0 and a.adetail > 0:
+                her_p = prompts.subject_prompt(ext_tags, tags, where, 0.0, a.quality)
+                extra_log["adetail"] = inlayout.adetail_restore(
+                    picture, g.rect, src, segment, inpaint, her_p, a.seed + 900, a.adetail,
+                    steps=a.steps)
             Image.fromarray(picture).save(work / "flat_extended.png")
             extra_log["extend_side"] = g.log
             print("extend side: cut at %s, added %s, canvas %s, %s"

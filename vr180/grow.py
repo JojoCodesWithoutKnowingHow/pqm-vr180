@@ -227,7 +227,8 @@ def extend_side(src: np.ndarray, cut: list[str], grow: float, long_side: float, 
                 quality: str = prompts.QUALITY, reference: np.ndarray | None = None,
                 steps: int | None = None, budget: int = 1280 * 1024, max_deg: float = 70.0,
                 refine_denoise: float = 0.35, rim: int = 16, step: float = 0.3,
-                segment=None, scene_of=None, max_steps: int = 8) -> Grown | None:
+                segment=None, scene_of=None, max_steps: int = 8,
+                guide: float = 0.0) -> Grown | None:
     """Grow each cut side ``step`` times the source's size at a time, and stop a
     side as soon as the body no longer reaches its new edge, or at ``grow`` in all,
     or at ``max_deg``. None when nothing is cut or there is no segmenter.
@@ -239,7 +240,15 @@ def extend_side(src: np.ndarray, cut: list[str], grow: float, long_side: float, 
     Round 2's first two tries, in order: growing a full source height at once gave
     Fubuki on the sofa a second body in the empty space below her; growing in steps
     with the subject's tags over the whole band still did, and a new figure touching
-    the edge kept the growth going (``track_body``)."""
+    the edge kept the growth going (``track_body``).
+
+    ``guide`` (round 29, the author's pick), with ``scene_of`` a layout drawn with
+    her full prompt: the layout places her legs and feet but continues them from a
+    source ~300 px tall, a latent cell there ~30 px here, so they meet the
+    source's off by about that. Each step then redraws, at ``guide`` from the
+    layout's own pixels (no hole), her fan and wherever the layout drew her body
+    in the band, and OVERLAP px into what is there: the pose from the layout, the
+    join at the source's resolution. The rest of the band stays the layout."""
     if segment is None:
         return None
     h, w = src.shape[:2]
@@ -301,6 +310,13 @@ def extend_side(src: np.ndarray, cut: list[str], grow: float, long_side: float, 
             d = {"bottom": "down", "top": "up", "left": "left", "right": "right"}[side]
             zone = (_fan(edge, d, inc, max(8, span // 8), math.tan(math.radians(12)))
                     if span else np.zeros((H, W), bool)) & band
+            if guide > 0 and scene_of is not None:
+                # Her body as the layout drew it in the band, grown so a limb can
+                # move onto the source's.
+                lay_body = segment(canvas) & band
+                zone |= cv2.dilate(lay_body.astype(np.uint8),
+                                   np.ones((2 * OVERLAP + 1,) * 2, np.uint8)) > 0
+                zone &= band
             rest = band & ~zone
             fans |= zone
             # The whole canvas, scaled to the budget: the model must see her --
@@ -348,12 +364,19 @@ def extend_side(src: np.ndarray, cut: list[str], grow: float, long_side: float, 
                 init = small if (scene_of is not None and k == 0) else _prefill(small, sm)
                 control = init.copy()
                 control[sm] = 0                  # NoobAI Inpainting: the hole pure black
+                guided = guide > 0 and scene_of is not None and k == 0
                 out = None
                 for attempt in range(2):
                     try:
-                        out = inpaint(init, (sm * 255).astype(np.uint8), prompt, negative,
-                                      seed + 10 * len(passes) + k + 997 * attempt,
-                                      control=control, reference=reference, steps=steps)
+                        if guided:
+                            out = inpaint(init, (sm * 255).astype(np.uint8), prompt, negative,
+                                          seed + 10 * len(passes) + k + 997 * attempt,
+                                          reference=reference, steps=steps, denoise=guide,
+                                          touch_up=True)
+                        else:
+                            out = inpaint(init, (sm * 255).astype(np.uint8), prompt, negative,
+                                          seed + 10 * len(passes) + k + 997 * attempt,
+                                          control=control, reference=reference, steps=steps)
                         break
                     except Exception as exc:   # a black (NaN) fill: dev5, Nami
                         if "black" not in str(exc):
@@ -401,7 +424,8 @@ def extend_side(src: np.ndarray, cut: list[str], grow: float, long_side: float, 
               {"cut": cut, "grow": grow, "step": step, "limit": limit, "added": add,
                "canvas": [W, H], "passes": passes, "refine_tiles": tiles,
                "refine_denoise": refine_denoise, "rim": rim,
-               "order": "body-first" if scene_of is None else "scene-first", "prompt": her})
+               "order": "body-first" if scene_of is None else "scene-first",
+               "guide": guide, "prompt": her})
     g.body = body
     g.fans = fans
     return g
