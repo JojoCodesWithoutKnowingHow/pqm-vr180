@@ -79,7 +79,7 @@ def make_layout(pano: np.ndarray, known: np.ndarray, fill_tags: list[str], where
                 reference: np.ndarray | None = None, steps: int | None = None,
                 work=None, strong: bool = False, hires: int = 0,
                 hires_denoise: float = 0.4, return_fisheye: bool = False,
-                region: tuple | None = None):
+                region: tuple | None = None, full_prompt: str | None = None):
     """(layout equirect the size of ``pano``, log). Outside the fisheye's disc the
     layout is the disc's edge carried outward and blurred, so a view there still
     starts from something of the scene's colour.
@@ -96,7 +96,13 @@ def make_layout(pano: np.ndarray, known: np.ndarray, fill_tags: list[str], where
     regional prompts -- her tags over her body and its continuation, the scene with
     no people everywhere else -- so the room and her legs are designed together
     (round 6 painted her into a finished room: pillows for legs, a sofa with
-    nipples). The hires pass does not touch her region."""
+    nipples). The hires pass does not touch her region.
+
+    ``full_prompt`` (round 18, the author's pipeline): the layout draws her too --
+    the source's full prompt (her, her pose, the scene, the lens words), with no
+    "no people" and a negative against a second person -- so her body's
+    continuation comes from the same pass as the room; an ADetailer pass then
+    refines her (``inlayout.adetail``), with no extension step at all."""
     from . import widen   # the pre-fill and the back fill live there
     H, W = known.shape
     fish = to_fisheye(pano, S, max_deg)
@@ -107,6 +113,10 @@ def make_layout(pano: np.ndarray, known: np.ndarray, fill_tags: list[str], where
     control = seeded.copy()
     control[mask > 0] = 0
     prompt = layout_prompt(fill_tags, where, quality, strong=strong)
+    hires_negative = prompts.NEGATIVE
+    if full_prompt:
+        prompt, negative = full_prompt, prompts.SUBJECT_NEGATIVE
+        hires_negative = negative
     extra = {}
     if region is not None:
         her_prompt, her = region
@@ -122,7 +132,7 @@ def make_layout(pano: np.ndarray, known: np.ndarray, fill_tags: list[str], where
             region[1].astype(np.uint8), np.ones((9, 9), np.uint8)) > 0)
         bmask = cv2.resize(keep.astype(np.uint8), (hires, hires),
                            interpolation=cv2.INTER_NEAREST) > 0
-        tiles = refine(big, bmask, inpaint, prompt, prompts.NEGATIVE, seed + 1, hires_denoise,
+        tiles = refine(big, bmask, inpaint, prompt, hires_negative, seed + 1, hires_denoise,
                        steps=steps)
         gen = big
     img, cover = from_fisheye(gen, W, max_deg)

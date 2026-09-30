@@ -527,3 +527,45 @@ def test_cli_runs_j_with_adetail(tmp_path, monkeypatch):
     assert log["adetail"]["denoise"] == 0.2 and "box" in log["adetail"]
     assert any(c["denoise"] == 0.2 and "sitting" in c["prompt"] and "cowboy shot" not in c["prompt"]
                for c in fake.calls)
+
+
+def test_cli_layout_full_prompt_then_adetail_no_extension(tmp_path, monkeypatch):
+    # Round 18 (the author's pipeline): no extension step; the layout gets the full
+    # prompt and draws her; an ADetailer pass refines her figure.
+    from vr180 import cli, forge, subject
+    src = checker(416, 608)
+    Image.fromarray(src).save(tmp_path / "src.png")
+    seg_model = tmp_path / "seg.onnx"
+    seg_model.write_bytes(b"x")
+    fake = ColourForge()
+
+    class FakeSeg:
+        def __init__(self, path):
+            self.fn = her_segment(src)
+
+        def __call__(self, rgb, threshold=0.5):
+            return self.fn(rgb, threshold)
+
+    monkeypatch.setattr(subject, "Segmenter", FakeSeg)
+    monkeypatch.setattr(forge.Forge, "resolve", lambda self, s: [])
+    monkeypatch.setattr(forge.Forge, "inpaint",
+                        lambda self, image, mask, prompt, negative, seed, s, **kw:
+                        fake(image, mask, prompt, negative, seed, **kw))
+    rc = cli.main([str(tmp_path / "src.png"), "-o", str(tmp_path / "o_180_LR.jpg"), "--checkpoint",
+                   "c", "--tags", "indoors, room", "--subject-tags", "1girl, skirt",
+                   "--subject-framing", "sitting, cowboy shot", "--long-side", "60",
+                   "--width", "1024", "--view-px", "256", "--segment-model", str(seg_model),
+                   "--pano-only", "--join", "hard", "--extend-in-layout", "--layout-full-prompt",
+                   "--extend-side", "0.6", "--layout", "fisheye", "--layout-px", "256",
+                   "--layout-hires", "512", "--layout-strong", "--compose", "0",
+                   "--seam-repaint", "0.4", "--soften-rim", "0", "--adetail", "0.2"])
+    assert rc == 0
+    log = json.loads((tmp_path / "o_180_LR.work" / "log.json").read_text(encoding="utf-8"))
+    lp = log["layout"]["prompt"]
+    assert "1girl" in lp and "sitting" in lp and "no humans" not in lp and "fisheye" in lp
+    assert "cowboy shot" not in lp
+    ad = log["extend_in_layout"]["adetail"]           # the pass ran (the fake segmenter
+    assert ad is not None                              # may not see the fake's figure)
+    assert "extend_side" not in log                         # no extension step
+    first = fake.calls[0]
+    assert first["her"] and first["control"] and not first["touch_up"]   # the layout itself

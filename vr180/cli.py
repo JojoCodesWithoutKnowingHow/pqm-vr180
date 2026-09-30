@@ -167,6 +167,11 @@ def parse(argv=None):
                         "and her body fixed, so the floor and furniture around her legs come from "
                         "the same pass as the room; the picture keeps only the source and her "
                         "body, and her outline is seam-repainted")
+    p.add_argument("--layout-full-prompt", action="store_true",
+                   help="round 18 (the author's pipeline), with --extend-in-layout: the layout "
+                        "is drawn round the source alone with the full prompt (her, her pose, "
+                        "the scene), so it draws her body's continuation itself; no extension "
+                        "step; use with --adetail")
     p.add_argument("--adetail", type=float, default=0.0, metavar="D",
                    help="round 16 (the author's idea), with --extend-in-layout: an ADetailer pass "
                         "-- her whole figure, source included, cropped and repainted once at D "
@@ -332,15 +337,21 @@ def main(argv=None) -> int:
                 her_p = prompts.subject_prompt(lens + list(subject_tags) + framing, tags, where,
                                                0.0, a.quality)
                 region = (her_p, her_f)
+        full_p = None
+        if a.layout_full_prompt:
+            lens = ["(fisheye:1.3)", "fisheye lens"] if a.layout_strong else ["fisheye"]
+            full_p = prompts.subject_prompt(lens + list(subject_tags)
+                                            + prompts.pose_words(a.subject_framing),
+                                            tags, where, 0.0, a.quality)
         lay, extra_log["layout"], fish = layout.make_layout(
             pano0, m0 > 0, tags, where, inpaint, a.seed + 7000, return_fisheye=True,
-            region=region, **lay_kw)
+            region=region, full_prompt=full_p, **lay_kw)
         res = inlayout.extend(src, seg_src, cut, long_side, W, fish, a.layout_deg, inpaint,
                               subject_tags, tags, where, a.seed + 5000, quality=a.quality,
                               reference=ref, steps=a.steps, grow_frac=a.extend_side or 1.0,
                               max_side_deg=a.extend_max_deg,
                               refine_denoise=a.extend_refine or 0.5, work=work,
-                              paint=region is None, segment=segment,
+                              paint=region is None and full_p is None, segment=segment,
                               framing=prompts.pose_words(a.subject_framing),
                               adetail=a.adetail)
         if res is not None:
