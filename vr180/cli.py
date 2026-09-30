@@ -416,7 +416,12 @@ def main(argv=None) -> int:
         keep = cv2.dilate(her.astype(np.uint8), np.ones((11, 11), np.uint8)) > 0
         keep[gy:gy + gh, gx:gx + gw] = True
         pano0, m0, _f = place(picture)
-        kp, _km, _kf = place((keep * 255).astype(np.uint8))
+        # The layout is told its fixed area ends ~10 px inside what is kept: the
+        # inpaint inks an outline along the edge of what it keeps, and pasting the
+        # source and her back then covers that line (round 11: the original's
+        # rectangle traced in thin lines through Fubuki's bed).
+        inset = cv2.erode(keep.astype(np.uint8), np.ones((21, 21), np.uint8)) > 0
+        kp, _km, _kf = place((inset * 255).astype(np.uint8))
         known = (kp > 127) & (m0 > 0)
         lay, extra_log["layout"] = layout.make_layout(pano0, known, tags, where, inpaint,
                                                       a.seed + 7000, **lay_kw)
