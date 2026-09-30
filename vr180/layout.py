@@ -80,7 +80,8 @@ def make_layout(pano: np.ndarray, known: np.ndarray, fill_tags: list[str], where
                 work=None, strong: bool = False, hires: int = 0,
                 hires_denoise: float = 0.4, return_fisheye: bool = False,
                 region: tuple | None = None, full_prompt: str | None = None,
-                full_negative: str | None = None):
+                full_negative: str | None = None, mask_grow: int = 2,
+                mask_blur: int | None = None):
     """(layout equirect the size of ``pano``, log). Outside the fisheye's disc the
     layout is the disc's edge carried outward and blurred, so a view there still
     starts from something of the scene's colour.
@@ -109,7 +110,13 @@ def make_layout(pano: np.ndarray, known: np.ndarray, fill_tags: list[str], where
     fish = to_fisheye(pano, S, max_deg)
     kf = to_fisheye((known * 255).astype(np.uint8), S, max_deg, cv2.INTER_NEAREST) > 127
     unknown = ~kf
-    mask = cv2.dilate(unknown.astype(np.uint8) * 255, np.ones((5, 5), np.uint8))
+    # ``mask_grow`` px into the known (5x5 was 2 px each way), and Forge's mask
+    # blur: round 29, the author -- what about the mask padding? Both let the model
+    # redraw the source's rim (at the fisheye's ~4 canvas px a pixel), and it
+    # continues her leg from its own rim, not the source's, which is pasted back.
+    k = 2 * mask_grow + 1
+    mask = (cv2.dilate(unknown.astype(np.uint8) * 255, np.ones((k, k), np.uint8)) if mask_grow
+            else unknown.astype(np.uint8) * 255)
     seeded = widen._seed(fish, mask > 0)
     control = seeded.copy()
     control[mask > 0] = 0
@@ -119,6 +126,8 @@ def make_layout(pano: np.ndarray, known: np.ndarray, fill_tags: list[str], where
         prompt, negative = full_prompt, full_negative or prompts.SUBJECT_NEGATIVE
         hires_negative = negative
     extra = {}
+    if mask_blur is not None:
+        extra["mask_blur"] = mask_blur
     if region is not None:
         her_prompt, her = region
         extra["regions"] = [(prompt, ~her), (her_prompt, her)]

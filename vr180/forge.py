@@ -127,7 +127,7 @@ class Forge:
                 seed: int, s: Settings, control: np.ndarray | None = None,
                 reference: np.ndarray | None = None, steps: int | None = None,
                 denoise: float | None = None, touch_up: bool = False,
-                regions: list | None = None) -> np.ndarray:
+                regions: list | None = None, mask_blur: int | None = None) -> np.ndarray:
         """``mask`` is uint8, 255 where to paint. ``control`` is the inpaint
         ControlNet's image (``noob``: the view with the hole pure black);
         ``reference`` the IP-Adapter's. ``denoise`` overrides the settings' for
@@ -146,7 +146,7 @@ class Forge:
             "init_images": [b64png(image)], "mask": b64png(mask),
             "prompt": prompt, "negative_prompt": negative,
             "denoising_strength": s.denoise if denoise is None else denoise,
-            "inpainting_fill": 1, "mask_blur": s.mask_blur,
+            "inpainting_fill": 1, "mask_blur": s.mask_blur if mask_blur is None else mask_blur,
             "inpaint_full_res": False, "inpainting_mask_invert": 0,
             "width": w, "height": h, "steps": steps or s.steps, "cfg_scale": s.cfg,
             "sampler_name": s.sampler, "scheduler": s.scheduler, "seed": seed,

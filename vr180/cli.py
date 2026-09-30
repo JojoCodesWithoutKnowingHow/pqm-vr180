@@ -161,6 +161,13 @@ def parse(argv=None):
                    help="the source's pose and framing words (e.g. 'sitting, crossed legs, "
                         "cowboy shot'); with --extend-regional they go into her region's prompt "
                         "so it knows where her body ends (round 7)")
+    p.add_argument("--layout-mask-grow", type=int, default=2, metavar="PX",
+                   help="round 30: how far the layout's mask reaches into the source (fisheye "
+                        "px; 2 was the fixed 5x5 dilation)")
+    p.add_argument("--layout-mask-blur", type=int, default=None, metavar="PX",
+                   help="round 30: Forge's mask blur for the layout's generation (default: the "
+                        "settings', 8). With --layout-mask-grow 0 the model must continue her "
+                        "from the source's own pixels, not a rim it redrew")
     p.add_argument("--extend-guided", type=float, default=0.0, metavar="D",
                    help="round 29 (the author's pick), with --extend-side and --layout fisheye: "
                         "the layout is drawn first with the full prompt (L's), then her body is "
@@ -295,10 +302,10 @@ def main(argv=None) -> int:
         return 2
 
     def inpaint(image, mask, prompt, negative, seed, control=None, reference=None, steps=None,
-                denoise=None, touch_up=False, regions=None):
+                denoise=None, touch_up=False, regions=None, mask_blur=None):
         return f.inpaint(image, mask, prompt, negative, seed, s, control=control,
                          reference=reference, steps=steps, denoise=denoise, touch_up=touch_up,
-                         regions=regions)
+                         regions=regions, mask_blur=mask_blur)
 
     opt = widen.Options(width=a.width, target_deg=a.target,
                         max_new=a.max_new, seed=a.seed, quality=a.quality,
@@ -349,7 +356,8 @@ def main(argv=None) -> int:
     grown_g, silhouette = None, None
     seg_src = segment(src) if (segment is not None and subject_tags) else None
     cut = widen._cut_edges(seg_src) if seg_src is not None else []
-    lay_kw = dict(max_deg=a.layout_deg, S=a.layout_px, quality=a.quality, reference=ref,
+    lay_kw = dict(mask_grow=a.layout_mask_grow, mask_blur=a.layout_mask_blur,
+                  max_deg=a.layout_deg, S=a.layout_px, quality=a.quality, reference=ref,
                   steps=a.steps, work=work, strong=a.layout_strong, hires=a.layout_hires,
                   hires_denoise=a.layout_hires_denoise)
 

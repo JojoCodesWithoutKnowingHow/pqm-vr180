@@ -840,3 +840,59 @@ def test_cli_extend_guided_draws_her_in_the_layout_then_grows_her_from_the_edge(
     assert "1girl" in lp and "sitting" in lp and "cowboy shot" not in lp
     assert log["extend_side"]["guide"] == 0.5 and log["extend_side"]["order"] == "scene-first"
     assert "adetail" in log
+
+
+@pytest.mark.parametrize("grow_px, blur", [(2, None), (0, 0), (0, 4)])
+def test_layout_mask_grow_and_blur(grow_px, blur):
+    # Round 30: the layout's mask reaches ``mask_grow`` px into the source, and the
+    # mask blur is passed to Forge only when set.
+    from vr180 import layout
+    src = checker(416, 608)
+    pano, mask, _f = sphere.place(src, 1024, 60.0)
+    seen = {}
+
+    def fake(image, m, prompt, negative, seed, **kw):
+        seen["mask"], seen["kw"] = m.copy(), kw
+        return image
+    layout.make_layout(pano, mask > 0, ["room"], None, fake, seed=1, S=256,
+                       mask_grow=grow_px, mask_blur=blur)
+    known = layout.to_fisheye((mask > 0).astype(np.uint8) * 255, 256, 100.0,
+                              cv2.INTER_NEAREST) > 127
+    into = int(((seen["mask"] > 0) & known).sum())
+    assert (into == 0) if grow_px == 0 else (into > 0)
+    assert (seen["kw"].get("mask_blur") == blur) if blur is not None else ("mask_blur" not in seen["kw"])
+
+
+def test_cli_layout_mask_grow_and_blur_reach_forge(tmp_path, monkeypatch):
+    # Round 30: through the CLI's own inpaint wrapper to Forge.
+    from vr180 import cli, forge, subject
+    src = checker(416, 608)
+    Image.fromarray(src).save(tmp_path / "src.png")
+    seg_model = tmp_path / "seg.onnx"
+    seg_model.write_bytes(b"x")
+    fake = ColourForge()
+
+    class FakeSeg:
+        def __init__(self, path):
+            self.fn = her_segment(src)
+
+        def __call__(self, rgb, threshold=0.5):
+            return self.fn(rgb, threshold)
+
+    monkeypatch.setattr(subject, "Segmenter", FakeSeg)
+    monkeypatch.setattr(forge.Forge, "resolve", lambda self, s: [])
+    monkeypatch.setattr(forge.Forge, "inpaint",
+                        lambda self, image, mask, prompt, negative, seed, s, **kw:
+                        fake(image, mask, prompt, negative, seed, **kw))
+    rc = cli.main([str(tmp_path / "src.png"), "-o", str(tmp_path / "o_180_LR.jpg"), "--checkpoint",
+                   "c", "--tags", "indoors, room", "--subject-tags", "1girl, skirt",
+                   "--subject-framing", "sitting", "--long-side", "60",
+                   "--width", "1024", "--view-px", "256", "--segment-model", str(seg_model),
+                   "--pano-only", "--join", "hard", "--extend-in-layout", "--layout-full-prompt",
+                   "--layout-mask-grow", "0", "--layout-mask-blur", "0", "--extend-side", "0.6",
+                   "--layout", "fisheye", "--layout-px", "256", "--layout-hires", "512",
+                   "--compose", "0", "--seam-repaint", "0.4", "--soften-rim", "0",
+                   "--adetail", "0.27"])
+    assert rc == 0
+    assert fake.calls[0]["mask_blur"] == 0 and "1girl" in fake.calls[0]["prompt"]
+    assert all(c["mask_blur"] is None for c in fake.calls[1:])   # only the layout's call
