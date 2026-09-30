@@ -346,11 +346,25 @@ def test_regional_layout_paints_her_only_in_her_region_and_hires_leaves_it():
     first = fake.calls[0]
     assert first["regions"] is not None and len(first["regions"]) == 2
     assert all(c["regions"] is None and not c["her"] for c in fake.calls[1:])  # the hires tiles
-    big_her = cv2.resize(her.astype(np.uint8), (512, 512), interpolation=cv2.INTER_NEAREST) > 0
+    # Where her region was painted (not her own source pixels), it holds her body.
+    known = layout.to_fisheye((mask > 0).astype(np.uint8) * 255, 256, 100.0, cv2.INTER_NEAREST) > 127
+    painted_her = cv2.resize((her & ~known).astype(np.uint8), (512, 512),
+                             interpolation=cv2.INTER_NEAREST) > 0
     green = (fish[..., 1] > 200) & (fish[..., 0] < 40) & (fish[..., 2] < 40)
-    inner = cv2.erode(big_her.astype(np.uint8), np.ones((25, 25), np.uint8)) > 0
-    assert green[inner].mean() > 0.5                 # her region kept its green body
+    inner = cv2.erode(painted_her.astype(np.uint8), np.ones((9, 9), np.uint8)) > 0
+    assert inner.any() and green[inner].mean() > 0.5   # her region kept its green body
     g, _fish2, log = inlayout.extend(src, seg, ["bottom"], 60.0, 1024, fish, 100.0,
                                      ColourForge(), ("1girl",), ["room"], None, seed=1,
                                      grow_frac=0.6, paint=False)
     assert log["order"] == "regional"
+
+
+def test_body_reach_follows_the_crossing_not_the_source():
+    # Round 7: a region sized as a fraction of the source was filled with her.
+    from vr180 import inlayout
+    seg = np.zeros((600, 400), bool)
+    seg[300:, 150:230] = True                    # legs 80 px wide at the bottom edge
+    seg[100:140, 390:] = True                    # a hand, 40 px, at the right edge
+    reach = inlayout.body_reach(seg, {"bottom": 600, "right": 400, "top": 600})
+    assert reach == {"bottom": 120, "right": 60}  # 1.5x each crossing; nothing at the top
+    assert inlayout.body_reach(seg, {"bottom": 50}) == {"bottom": 50}   # never past the limit

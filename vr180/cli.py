@@ -156,6 +156,10 @@ def parse(argv=None):
                         "layout with two regional prompts (Forge Couple) -- her tags over her "
                         "body and its continuation, the scene with no people elsewhere -- "
                         "instead of inpainting her into a finished layout")
+    p.add_argument("--subject-framing", default="",
+                   help="the source's pose and framing words (e.g. 'sitting, crossed legs, "
+                        "cowboy shot'); with --extend-regional they go into her region's prompt "
+                        "so it knows where her body ends (round 7)")
     p.add_argument("--extend-step", type=float, default=0.3,
                    help="grow a cut side this fraction of the source's size at a time, and stop "
                         "once the body no longer reaches the new edge (round 2: growing it all at "
@@ -298,7 +302,12 @@ def main(argv=None) -> int:
                                             a.layout_deg, a.extend_side or 1.0,
                                             a.extend_max_deg)
             if her_f is not None:
-                her_p = prompts.subject_prompt(list(subject_tags), tags, where, 0.0, a.quality)
+                # Her pose and framing, and the same projection words as the scene
+                # (round 7: her region had neither, and was filled with her).
+                framing = prompts.split_tags(a.subject_framing)
+                lens = ["(fisheye:1.3)", "fisheye lens"] if a.layout_strong else ["fisheye"]
+                her_p = prompts.subject_prompt(lens + list(subject_tags) + framing, tags, where,
+                                               0.0, a.quality)
                 region = (her_p, her_f)
         lay, extra_log["layout"], fish = layout.make_layout(
             pano0, m0 > 0, tags, where, inpaint, a.seed + 7000, return_fisheye=True,
@@ -308,7 +317,8 @@ def main(argv=None) -> int:
                               reference=ref, steps=a.steps, grow_frac=a.extend_side or 1.0,
                               max_side_deg=a.extend_max_deg,
                               refine_denoise=a.extend_refine or 0.5, work=work,
-                              paint=region is None)
+                              paint=region is None, segment=segment,
+                              framing=prompts.split_tags(a.subject_framing))
         if res is not None:
             g, fish, extra_log["extend_in_layout"] = res
             img_, cover_ = layout.from_fisheye(fish, W, a.layout_deg)

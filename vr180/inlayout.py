@@ -28,6 +28,22 @@ import numpy as np
 from . import grow, layout, prompts, sphere
 
 
+def body_reach(seg: np.ndarray, add: dict, factor: float = 1.5) -> dict:
+    """How far her region reaches past each cut edge: ``factor`` times the width
+    where her body crosses it, never past ``add`` (round 7, the author in the
+    headset: a region sized as a fraction of the source was filled with her
+    whatever she needed -- Nami's jeans ran to the bottom of the view, a kneeling
+    Yamato stood up in a hakama to the viewer's feet)."""
+    edges = {"bottom": seg[-1], "top": seg[0], "left": seg[:, 0], "right": seg[:, -1]}
+    out = {}
+    for side, n in add.items():
+        idx = np.flatnonzero(edges[side])
+        if idx.size < 4:
+            continue
+        out[side] = int(np.clip(factor * (idx.max() - idx.min() + 1), 48, n))
+    return out
+
+
 def her_on_fisheye(src: np.ndarray, seg: np.ndarray, cut: list[str], long_side: float, W: int,
                    S: int, max_deg: float, grow_frac: float = 1.0,
                    max_side_deg: float = 70.0) -> np.ndarray | None:
@@ -40,7 +56,7 @@ def her_on_fisheye(src: np.ndarray, seg: np.ndarray, cut: list[str], long_side: 
         return None
     Wc, Hc, x0, y0 = grow.canvas_geometry(w, h, add)
     cx, cy = x0 + w / 2, y0 + h / 2
-    zone = grow.body_zone(seg, (x0, y0, w, h), (Hc, Wc), add)
+    zone = grow.body_zone(seg, (x0, y0, w, h), (Hc, Wc), body_reach(seg, add))
     body = np.zeros((Hc, Wc), bool)
     body[y0:y0 + h, x0:x0 + w] = seg
     her = cv2.dilate((zone | body).astype(np.uint8), np.ones((15, 15), np.uint8)) * 255
@@ -53,7 +69,8 @@ def extend(src: np.ndarray, seg: np.ndarray, cut: list[str], long_side: float, W
            where: str | None, seed: int, quality: str = prompts.QUALITY,
            reference: np.ndarray | None = None, steps: int | None = None,
            grow_frac: float = 1.0, max_side_deg: float = 70.0, budget: int = 1280 * 1024,
-           refine_denoise: float = 0.5, work=None, paint: bool = True):
+           refine_denoise: float = 0.5, work=None, paint: bool = True, segment=None,
+           framing=()):
     """(grown picture as ``grow.Grown``, updated fisheye, log), or None when nothing
     is cut. ``fish`` is the layout's (hires) fisheye, ``max_deg`` its reach.
     ``paint=False`` (round 7): the layout was generated with her region already, so
@@ -65,7 +82,8 @@ def extend(src: np.ndarray, seg: np.ndarray, cut: list[str], long_side: float, W
         return None
     Wc, Hc, x0, y0 = grow.canvas_geometry(w, h, add)
     cx, cy = x0 + w / 2, y0 + h / 2
-    zone = grow.body_zone(seg, (x0, y0, w, h), (Hc, Wc), add)
+    zone = grow.body_zone(seg, (x0, y0, w, h), (Hc, Wc),
+                          body_reach(seg, add) if not paint else add)
     if zone.sum() < 64:
         return None
     S = fish.shape[0]
@@ -79,9 +97,11 @@ def extend(src: np.ndarray, seg: np.ndarray, cut: list[str], long_side: float, W
     if not paint:
         fish = fish.copy()
         top = left = side = g = 0
-        her = prompts.subject_prompt(list(subject_tags), list(fill_tags), where, 0.0, quality)
+        her = prompts.subject_prompt(list(subject_tags) + list(framing), list(fill_tags), where,
+                                     0.0, quality)
         return _flat(src, fish, W, max_deg, f, Wc, Hc, x0, y0, cx, cy, zone, inpaint, her, seed,
-                     steps, refine_denoise, work, cut, add, (top, left, side), g, "regional")
+                     steps, refine_denoise, work, cut, add, (top, left, side), g, "regional",
+                     segment)
     ys, xs = np.nonzero(zf | sf)
     # A crop holding her and the fan, with a third again of room around them.
     y_a, y_b, x_a, x_b = ys.min(), ys.max() + 1, xs.min(), xs.max() + 1
@@ -110,7 +130,7 @@ def extend(src: np.ndarray, seg: np.ndarray, cut: list[str], long_side: float, W
 
 
 def _flat(src, fish, W, max_deg, f, Wc, Hc, x0, y0, cx, cy, zone, inpaint, her, seed, steps,
-          refine_denoise, work, cut, add, crop, g, order):
+          refine_denoise, work, cut, add, crop, g, order, segment=None):
     """The grown flat canvas out of the (updated) fisheye; the fan refined there at
     the source's resolution."""
     h, w = src.shape[:2]
@@ -119,6 +139,11 @@ def _flat(src, fish, W, max_deg, f, Wc, Hc, x0, y0, cx, cy, zone, inpaint, her, 
     canvas = sphere.flat_of(lay_eq, Wc, Hc, f, cx, cy)
     canvas[y0:y0 + h, x0:x0 + w] = src
     near = cv2.dilate(zone.astype(np.uint8), np.ones((25, 25), np.uint8)) > 0
+    if segment is not None:
+        # Only what the layout drew as her (round 7: sharpening the whole fan with
+        # her tags left a ghost of her on the sofa the fan crossed).
+        body = segment(canvas)
+        near &= cv2.dilate(body.astype(np.uint8), np.ones((15, 15), np.uint8)) > 0
     near[y0 + 8:y0 + h - 8, x0 + 8:x0 + w - 8] = False
     tiles = grow.refine(canvas, near, inpaint, her, prompts.SUBJECT_NEGATIVE, seed + 500,
                         refine_denoise, steps=steps) if refine_denoise > 0 else 0
