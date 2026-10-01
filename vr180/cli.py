@@ -244,6 +244,10 @@ def parse(argv=None):
     p.add_argument("--keep-threshold", type=float, default=0.15,
                    help="with --layout-owns-scenery: the segmenter threshold for what counts as "
                         "her inside the extension's painted areas")
+    p.add_argument("--inner-seam-inner", type=int, default=8, metavar="PX",
+                   help="round 41: how far the inner seam repaint reaches into the source "
+                        "(the author, r40: with the grey gone the source's edge reads as a pane "
+                        "of glass -- crisp inside, the layout's softer look outside)")
     p.add_argument("--inner-seam-outer", type=int, default=24, metavar="PX",
                    help="how far past the source's edge the inner seam repaint reaches (round 10: "
                         "24 px hid a sharpness step, not the layout's different shading)")
@@ -624,6 +628,7 @@ def main(argv=None) -> int:
             seam["repaint_inner"] = seams.repaint(
                 r.pano, orig_mask > 0, inpaint, sp, sn, a.seed + 9500,
                 denoise=a.inner_seam_denoise or a.seam_repaint, outer=a.inner_seam_outer,
+                inner=a.inner_seam_inner,
                 steps=a.steps)
         if silhouette is not None:
             # Her outline, where her body meets the layout's scenery (J).

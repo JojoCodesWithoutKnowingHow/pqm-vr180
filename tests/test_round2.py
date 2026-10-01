@@ -1082,3 +1082,43 @@ def test_forge_touch_mask_weight_only_when_set_and_fills_get_full(monkeypatch):
     forge.Forge().inpaint(img, m, "p", "n", 1, forge.Settings(checkpoint="c", method="plain"),
                           touch_up=True)
     assert "inpainting_mask_weight" not in sent[0]["override_settings"]
+
+
+def test_cli_inner_seam_inner_reaches_the_repaint(tmp_path, monkeypatch):
+    # Round 41: the inner seam repaint's reach into the source.
+    from vr180 import cli, forge, seam, subject
+    src = checker(416, 608)
+    Image.fromarray(src).save(tmp_path / "src.png")
+    seg_model = tmp_path / "seg.onnx"
+    seg_model.write_bytes(b"x")
+    fake = ColourForge()
+
+    class FakeSeg:
+        def __init__(self, path):
+            self.fn = her_segment(src)
+
+        def __call__(self, rgb, threshold=0.5):
+            return self.fn(rgb, threshold)
+
+    seen = []
+    real = seam.repaint
+
+    def repaint(*args, **kw):
+        seen.append(kw)
+        return real(*args, **kw)
+    monkeypatch.setattr(seam, "repaint", repaint)
+    monkeypatch.setattr(subject, "Segmenter", FakeSeg)
+    monkeypatch.setattr(forge.Forge, "resolve", lambda self, s: [])
+    monkeypatch.setattr(forge.Forge, "inpaint",
+                        lambda self, image, mask, prompt, negative, seed, s, **kw:
+                        fake(image, mask, prompt, negative, seed, **kw))
+    rc = cli.main([str(tmp_path / "src.png"), "-o", str(tmp_path / "o_180_LR.jpg"), "--checkpoint",
+                   "c", "--tags", "indoors, room", "--subject-tags", "1girl, skirt",
+                   "--subject-framing", "sitting", "--long-side", "60",
+                   "--width", "1024", "--view-px", "256", "--segment-model", str(seg_model),
+                   "--pano-only", "--join", "hard", "--extend-in-layout", "--layout-full-prompt",
+                   "--extend-side", "0.6", "--layout", "fisheye", "--layout-px", "256",
+                   "--layout-hires", "512", "--compose", "0", "--seam-repaint", "0.4",
+                   "--soften-rim", "0", "--inner-seam-inner", "48", "--inner-seam-outer", "48"])
+    assert rc == 0
+    assert any(k.get("inner") == 48 and k.get("outer") == 48 for k in seen)
