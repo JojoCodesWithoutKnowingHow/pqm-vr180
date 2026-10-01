@@ -3,12 +3,41 @@
 The VR extension's companion program for PromptQueueManager (PQM): **one flat
 image in, one VR180 file out**, run on a PQM pod beside Forge.
 
-    python -m vr180 SRC.png -o OUT_180_LR.jpg --checkpoint waiIllustriousSDXL_v140 \
+    python -m vr180 SRC.png -o OUT_180_LR.jpg \
         --tags "indoors, living room, wooden floor, bookshelf" \
-        --subject-tags "1girl, brown hair, white sweater, blue jeans"
+        --subject-tags "1girl, brown hair, white sweater, blue jeans" \
+        --subject-framing "sitting, crossed legs, cowboy shot" --loras "<lora:her:0.8>"
 
 Proven on single images in V.1 (2026-09-28/29) and tuned for anime indoor scenes
 over five rounds, every default below judged by the author in a Quest 3.
+
+## 0.5.0: the outpaint rework's baseline is the default
+
+Fifty-one rounds on pods (2026-09-30 – 10-01), each judged in a Quest 3, one change
+at a time against an approved baseline, settled the widening. **A run with no flags
+is that baseline**; written out, it is
+
+    --checkpoint Waifu-Inpaint-XL --method plain --denoise 1.0 --join hard --auto-pipeline
+    --extend-side 1.0 --extend-refine 0.35 --layout fisheye --layout-strong
+    --layout-hires 2048 --layout-hires-denoise 0.4 --compose 0.3 --seam-repaint 0.4
+    --soften-rim 0 --keep-threshold 0.15 --source-fade 32 --adetail 0.27
+    --layout-mask-grow 0 --layout-mask-blur 4 --touch-mask-weight-j 0 --no-detail-match
+
+- **[Waifu-Inpaint-XL](https://huggingface.co/ShinoharaHare/Waifu-Inpaint-XL)** (at
+  `a33e08f`): WAI-illustrious v14 v-pred with its input widened to 9 channels, so the
+  model sees the known pixels. It ended the joins that were off by a latent cell with
+  WAI + the NoobAI inpainting ControlNet. **Gated**: each user requests access with
+  their own Hugging Face account.
+- **`--auto-pipeline`**: her body is grown stepwise from the frame first (J); if it
+  still reaches a grown edge, her limbs run out of frame and the layout is drawn with
+  the full prompt and an ADetailer pass (L) instead.
+- **`--loras`**: the source's LoRA calls go on every pass that draws her -- the
+  extension, the layout's full prompt, ADetailer, the seam repaint across her -- and
+  on no scenery-only view. A call whose file Forge does not list stops the run.
+- Every flag that lost a round is still here, off; each one's help says which round.
+
+The sections below describe V.1's pipeline, which 0.5.0 builds on; where they name a
+default (the NoobAI ControlNet, `--soften-rim 12`, `--detail-match`) it is V.1's.
 
 ## What it does, and the defaults
 
@@ -65,11 +94,14 @@ placement and why, and the seam measurements.
 `setup/pod_setup.sh all` installs and verifies everything, given PQM's pod image
 (Forge Neo at `:7860`) and this repo checked out anywhere (the script finds its
 own checkout; PQM's pod fetches it at a pinned commit): the companion's venv,
-stereo360 (warmed), MoGe-2 in its own venv (warmed), six sha256-pinned models
-(NoobAI Inpainting, noobIPA MARK1, CLIP-ViT-bigG, anime-seg, and the WD tagger's
-model and tag list), and **`restart`**: Forge restarted exactly as the image
-started it (`setup/restart_forge.py`), waited for until it lists the ControlNets. The
-checkpoint and any style LoRA are the pod's business (PQM provisions them). Two
+stereo360 (warmed), MoGe-2 in its own venv (warmed), three sha256-pinned models
+(anime-seg, and the WD tagger's model and tag list), and **`checkpoint`**:
+Waifu-Inpaint-XL, with `HF_TOKEN` from the environment (a 401 or 403 says to request
+access). Under PQM the checkpoint and LoRAs are PQM's to fetch, with the user's own
+tokens -- an install step never sees a credential -- so PQM runs every part but
+`checkpoint`. **`noob`** adds V.1's NoobAI Inpainting, noobIPA MARK1 and
+CLIP-ViT-bigG for `--method noob`, then **`restart`**s Forge exactly as the image
+started it (`setup/restart_forge.py`), waited for until it lists the ControlNets. Two
 things about that image, measured in V.1:
 
 - **Download into `models/` only after Forge answers**: the entrypoint replaces

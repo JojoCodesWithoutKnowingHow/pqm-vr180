@@ -8,6 +8,10 @@ import pytest
 from vr180 import flatext, layout, prompts, sphere, widen
 
 
+#: Written against the CLI's defaults before 0.5.0 (conftest.V1_DEFAULTS).
+pytestmark = pytest.mark.usefixtures("v1_defaults")
+
+
 def checker(w, h, cell=32):
     y, x = np.mgrid[0:h, 0:w]
     v = (((x // cell) + (y // cell)) % 2 * 200 + 30).astype(np.uint8)

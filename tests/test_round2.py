@@ -12,6 +12,10 @@ from test_outpaint import ColourForge, checker, her_segment
 from vr180 import grow, seam, sphere
 
 
+#: Written against the CLI's defaults before 0.5.0 (conftest.V1_DEFAULTS).
+pytestmark = pytest.mark.usefixtures("v1_defaults")
+
+
 def test_place_focal_centred_is_place():
     src = checker(416, 608)
     a, ma, _f = sphere.place(src, 1024, 60.0)

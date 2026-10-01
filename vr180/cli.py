@@ -30,7 +30,7 @@ DEPTH_MODELS = {"any-b": ["--depth-backend", "depth-anything"],
                 "da3": ["--depth-backend", "depth-anything-v3"]}
 
 
-def parse(argv=None):
+def parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="vr180", description=__doc__.split("\n\n")[0])
     p.add_argument("src")
     p.add_argument("-o", "--out", required=True, help="the VR180 file (name it *_180_LR.jpg)")
@@ -39,12 +39,20 @@ def parse(argv=None):
     p.add_argument("--subject-tags", default="",
                    help="the subject's own tags; given, a subject the frame cuts off is "
                         "continued with them (empty: never continue a body)")
+    p.add_argument("--loras", default="",
+                   help="the source's LoRA calls, e.g. '<lora:tifa:0.8>' (0.5.0): added to every "
+                        "pass that draws her (the extension, the layout's full prompt, "
+                        "ADetailer, the seam repaint), never to a scenery-only view. Forge must "
+                        "list each file")
     p.add_argument("--segment-model", default=SEG_MODEL, help="anime-seg isnetis.onnx")
-    p.add_argument("--checkpoint", required=True, help="Forge checkpoint for the fill")
-    p.add_argument("--method", choices=("noob", "plain", "cn"), default="noob",
-                   help="noob: NoobAI Inpainting ControlNet (Illustrious/NoobAI checkpoints). "
-                        "plain: the checkpoint's own inpaint. cn: ControlNet Union ProMax -- "
-                        "NaN or noise in Forge Neo as pinned (V.1)")
+    p.add_argument("--checkpoint", default="Waifu-Inpaint-XL",
+                   help="Forge checkpoint for the fill (default: Waifu-Inpaint-XL, the "
+                        "inpainting model the outpaint rework settled on, round 35)")
+    p.add_argument("--method", choices=("noob", "plain", "cn"), default="plain",
+                   help="plain (default): the checkpoint's own inpaint -- with an inpainting "
+                        "checkpoint, the model sees the known pixels. noob: NoobAI Inpainting "
+                        "ControlNet (Illustrious/NoobAI checkpoints; needs pod_setup.sh noob). "
+                        "cn: ControlNet Union ProMax -- NaN or noise in Forge Neo as pinned (V.1)")
     p.add_argument("--no-reference", dest="reference", action="store_false",
                    help="do not give the source to the IP-Adapter as a reference (on by "
                         "default with --method noob; noobIPA is for Illustrious/NoobAI)")
@@ -53,8 +61,8 @@ def parse(argv=None):
     p.add_argument("--prompt-mode", choices=("tags", "minimal"), default="tags")
     p.add_argument("--no-plain-fill", action="store_true",
                    help="generate plain backgrounds too, instead of extending the colour")
-    p.add_argument("--denoise", type=float, default=None,
-                   help="default: 1.0 for noob, 0.95 otherwise")
+    p.add_argument("--denoise", type=float, default=1.0,
+                   help="the fill's denoise (default 1.0; V.1's plain fills used 0.95)")
     p.add_argument("--cn-model", default="", help="the inpaint ControlNet's name")
     p.add_argument("--forge", default="http://127.0.0.1:7860")
     p.add_argument("--long-side", default="moge",
@@ -76,13 +84,16 @@ def parse(argv=None):
                    help="each view's field of view; narrower views put more pixels on each "
                         "degree (sharper fill, more views)")
     p.add_argument("--view-px", type=int, default=1024)
-    # Both on by default: the author judged detail match + rim softening the best at the
-    # seam in the headset (V.1, round 3). The seam was a sharpness step, not a colour one.
+    # V.1 (round 3) turned both on; the outpaint rework (0.5.0) turned both off: with the
+    # inpainting model the detail match sharpened only the outpaint, by 0.7-1.5, and the
+    # seam repaint replaces the rim softening.
+    p.add_argument("--detail-match", dest="detail_match", action="store_true", default=False,
+                   help="sharpen the fill to the source's fine-detail level (V.1; off since 0.5.0)")
     p.add_argument("--no-detail-match", dest="detail_match", action="store_false",
-                   help="do not sharpen the fill to the source's fine-detail level")
-    p.add_argument("--soften-rim", type=int, default=12, metavar="PX",
-                   help="soften the source's outermost PX pixels toward the fill (default 12; "
-                        "0 turns it off; touches the source's edge, which the author allowed)")
+                   help="the default since 0.5.0")
+    p.add_argument("--soften-rim", type=int, default=0, metavar="PX",
+                   help="soften the source's outermost PX pixels toward the fill (default 0, "
+                        "off since 0.5.0; V.1 used 12)")
     p.add_argument("--cfg", type=float, default=5.0)
     p.add_argument("--seed", type=int, default=1234)
     p.add_argument("--quality", default=prompts.QUALITY,
@@ -115,7 +126,7 @@ def parse(argv=None):
     p.add_argument("--stereo-dir", default="/workspace/stereo360")
     p.add_argument("--pano-only", action="store_true", help="stop before stereo")
     # The outpaint work (round 1): each off by default until judged in the headset.
-    p.add_argument("--join", choices=("blend", "hard"), default="blend",
+    p.add_argument("--join", choices=("blend", "hard"), default="hard",
                    help="blend: 0.4.0 (a 32 px cross-fade into earlier fill, a painted body "
                         "may be repainted). hard: a painted body is kept, scene joins blend over "
                         "8 px, the body's zone fans out, and it grows at --grow-threshold")
@@ -128,22 +139,22 @@ def parse(argv=None):
                    help="finish a body the frame cuts off on the flat picture first: grow the "
                         "canvas F times along each cut axis, symmetrically, in one inpaint "
                         "(0: off). Needs --subject-tags")
-    p.add_argument("--layout", choices=("none", "fisheye"), default="none",
+    p.add_argument("--layout", choices=("none", "fisheye"), default="fisheye",
                    help="fisheye: lay the whole front out in one generation first, then refine "
                         "each scene view over it at --layout-denoise")
     p.add_argument("--layout-denoise", type=float, default=0.7)
     p.add_argument("--layout-deg", type=float, default=100.0,
                    help="the layout fisheye reaches this far off straight ahead")
     p.add_argument("--layout-px", type=int, default=1024)
-    p.add_argument("--layout-hires", type=int, default=0, metavar="PX",
+    p.add_argument("--layout-hires", type=int, default=2048, metavar="PX",
                    help="scale the layout up to PX and refine it in tiles (the hires fix), so "
                         "the scene reaches the panorama's density (0: off; 2048 ~ the panorama)")
     p.add_argument("--layout-hires-denoise", type=float, default=0.4)
-    p.add_argument("--layout-strong", action="store_true",
+    p.add_argument("--layout-strong", action=argparse.BooleanOptionalAction, default=True,
                    help="weight the layout's fisheye words (round 1: one layout came back as "
                         "an ordinary wide-angle picture)")
     # Round 2 (the author's round-1 verdicts): off by default until judged.
-    p.add_argument("--extend-side", type=float, default=0.0, metavar="G",
+    p.add_argument("--extend-side", type=float, default=1.0, metavar="G",
                    help="grow only the side(s) the frame cuts the body, each by G times the "
                         "source's size across it, keeping its optical centre (0: off). Round 1's "
                         "symmetric --flat-extend gave a cut side only +25%%")
@@ -165,7 +176,7 @@ def parse(argv=None):
                    help="round 39, with an inpainting (9-channel) checkpoint: Forge's Inpainting "
                         "Conditioning Mask Strength for the touch-up passes (0: they see the "
                         "image, not a grey hole); fills send 1.0 (r37-38: grey lines and haze)")
-    p.add_argument("--touch-mask-weight-j", type=float, default=None, metavar="W",
+    p.add_argument("--touch-mask-weight-j", type=float, default=0.0, metavar="W",
                    help="round 48, with --auto-pipeline: --touch-mask-weight W only when the "
                         "pipeline chosen is J (r46: at 0 Yamato's grey border went, but the "
                         "L images got a hard border at their frame)")
@@ -184,10 +195,10 @@ def parse(argv=None):
                         "body outside the source is generated anew from a hole on the fisheye "
                         "at PX, in a 1024 px window holding the whole source (r31-32: 1536/2048 "
                         "layouts align the leg but compose a second figure)")
-    p.add_argument("--layout-mask-grow", type=int, default=2, metavar="PX",
+    p.add_argument("--layout-mask-grow", type=int, default=0, metavar="PX",
                    help="round 30: how far the layout's mask reaches into the source (fisheye "
                         "px; 2 was the fixed 5x5 dilation)")
-    p.add_argument("--layout-mask-blur", type=int, default=None, metavar="PX",
+    p.add_argument("--layout-mask-blur", type=int, default=4, metavar="PX",
                    help="round 30: Forge's mask blur for the layout's generation (default: the "
                         "settings', 8). With --layout-mask-grow 0 the model must continue her "
                         "from the source's own pixels, not a rim it redrew")
@@ -205,7 +216,7 @@ def parse(argv=None):
                         "layout's pixels, in a crop of her whole figure at about half the "
                         "source's resolution (r19: a shin met the source's ~30 px off; r24-25: "
                         "a regenerated band and a sideways warp both failed)")
-    p.add_argument("--auto-pipeline", action="store_true",
+    p.add_argument("--auto-pipeline", action=argparse.BooleanOptionalAction, default=True,
                    help="round 23 (the author's pick): grow her body stepwise first (J's "
                         "extension); if her body still reaches a grown edge after any step, "
                         "her limbs run out of frame -- use L (--extend-in-layout "
@@ -238,7 +249,7 @@ def parse(argv=None):
                         "is drawn round the source alone with the full prompt (her, her pose, "
                         "the scene), so it draws her body's continuation itself; no extension "
                         "step; use with --adetail")
-    p.add_argument("--adetail", type=float, default=0.0, metavar="D",
+    p.add_argument("--adetail", type=float, default=0.27, metavar="D",
                    help="round 16 (the author's idea), with --extend-in-layout: an ADetailer pass "
                         "-- her whole figure, source included, cropped and repainted once at D "
                         "with the full prompt; then the source restored (0: off)")
@@ -287,16 +298,20 @@ def parse(argv=None):
     p.add_argument("--order", choices=("body-first", "scene-first"), default="body-first",
                    help="scene-first (with --layout fisheye and --extend-side): lay the scene "
                         "out, then paint the body over it in a fan from the cut edge")
-    p.add_argument("--compose", type=float, default=-1.0, metavar="D",
+    p.add_argument("--compose", type=float, default=0.3, metavar="D",
                    help="compose (G): with --layout fisheye, the laid-out scene is final; every "
                         "view is a detail pass over it at denoise D, no inpaint ControlNet, no "
                         "view with the subject's tags (0: off). Round 2: E repainted the layout "
                         "at 0.7 and inked a line at each view's edge; F grew new bodies. 0: no "
                         "detail pass, the (hires) layout as it is; below 0: off")
-    p.add_argument("--seam-repaint", type=float, default=0.0, metavar="D",
+    p.add_argument("--seam-repaint", type=float, default=0.4, metavar="D",
                    help="repaint a narrow band across the picture's edge on the sphere at this "
                         "denoise (0: off). Use with --soften-rim 0")
-    return p.parse_args(argv)
+    return p
+
+
+def parse(argv=None):
+    return parser().parse_args(argv)
 
 
 def _strength_out(out: Path, value: str, first: bool) -> Path:
@@ -326,6 +341,11 @@ def main(argv=None) -> int:
         tags += prompts.split_tags(Path(a.tags_file).read_text(encoding="utf-8"))
     tags = list(dict.fromkeys(tags))
     subject_tags = tuple(prompts.split_tags(a.subject_tags))
+    try:
+        prompts.HER_LORAS = prompts.lora_calls(a.loras)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
 
     f = forge.Forge(a.forge)
     denoise = a.denoise if a.denoise is not None else (1.0 if a.method == "noob" else 0.95)
@@ -334,7 +354,7 @@ def main(argv=None) -> int:
                        ipa_weight=a.ipa_weight,
                        steps=a.steps, cfg=a.cfg, sampler=a.sampler, scheduler=a.scheduler,
                        denoise=denoise, touch_mask_weight=a.touch_mask_weight)
-    missing = f.resolve(s)
+    missing = f.resolve(s) + f.missing_loras(prompts.HER_LORAS)
     segment = None
     if subject_tags or a.long_side in ("shot", "camera"):
         if not Path(a.segment_model).exists():
@@ -362,8 +382,8 @@ def main(argv=None) -> int:
                         layout_denoise=a.compose if a.compose >= 0 else a.layout_denoise,
                         compose=a.compose >= 0)
     if a.compose >= 0 and a.layout != "fisheye":
-        print("--compose needs --layout fisheye: it only details the laid-out scene",
-              file=sys.stderr)
+        print("--compose needs --layout fisheye: it only details the laid-out scene "
+              "(with --layout none, pass --compose -1 too)", file=sys.stderr)
         return 2
     src = np.array(Image.open(a.src).convert("RGB"))
     h, w = src.shape[:2]
@@ -691,7 +711,7 @@ def main(argv=None) -> int:
     Image.fromarray(src_mask).save(work / "source_mask.png")
     log = {"version": __version__, "src": a.src, "argv": sys.argv[1:] if argv is None else argv,
            "method": a.method, "cn_model": s.cn_model, "ipa_model": s.ipa_model,
-           "checkpoint": a.checkpoint, "denoise": denoise,
+           "checkpoint": a.checkpoint, "denoise": denoise, "loras": list(prompts.HER_LORAS),
            "placement": {"long_side": long_side, "why": why}, "depth_model": a.depth_model,
            "seam": seam, **extra_log,
            "widen": r.log}

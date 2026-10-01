@@ -1,7 +1,14 @@
 #!/usr/bin/env bash
 # Install what vr180 needs on a PQM pod (Forge Neo already running at :7860).
 #
-#   pod_setup.sh companion|stereo360|models|moge|restart|promax|verify|all
+#   pod_setup.sh companion|stereo360|models|moge|verify|checkpoint|noob|restart|promax|all
+#
+# Since 0.5.0 the default fill is Waifu-Inpaint-XL's own inpaint: no ControlNet, so
+# `models` fetches only the segmenter and the tagger, and no Forge restart is needed.
+# The checkpoint is gated on Hugging Face. PQM fetches it itself, with the user's own
+# token (its install steps never see a credential); `checkpoint` is for a pod set up
+# by hand, with HF_TOKEN in the environment. `noob` adds V.1's NoobAI ControlNet and
+# IP-Adapter for --method noob, and restarts Forge so it lists them.
 #
 # Each part is verified before it prints "SETUP <part> OK"; a part that cannot be
 # verified exits non-zero, which is what a bootstrap should read as failure.
@@ -35,19 +42,25 @@ CN="$FORGE_DIR/models/ControlNet"
 PRE="$FORGE_DIR/models/ControlNetPreprocessor"
 # Each: destination, URL at a pinned revision, sha256.
 MODELS=(
-  # NoobAI Inpainting ControlNet, fp16 (Acly's copy of Wenaka_'s; fair-ai-public-license-1.0-sd)
-  "$CN/noobaiInpainting_v10.fp16.safetensors|$HF/Acly/NoobAI-Inpainting/resolve/7341925b3346eb48dcac4dd4049cdb5bf2afd472/noobaiInpainting_v10.fp16.safetensors|8b3c2155ec8a49b43a8a32dac39a21b8c09ea60a7afaffe3c7a6fb51313a45d6"
-  # NoobAI IP-Adapter MARK1, the reference model Krita AI Diffusion uses for Illustrious
-  "$CN/noobIPAMARK1_mark1.safetensors|$HF/r3gm/noob-ipa/resolve/534fdd8fb5a221d67937d5495febd2560a1d395e/model_G/noobIPAMARK1_mark1.safetensors|5cdb6a00be1b12579745b5bed0c7b83f0869073d8a864fa8cd50a9356601919a"
-  # CLIP-ViT-bigG, under the name Forge's "CLIP-ViT-bigG (IPAdapter)" preprocessor looks for
-  "$PRE/CLIP-ViT-bigG.safetensors|$HF/h94/IP-Adapter/resolve/018e402774aeeddd60609b4ecdb7e298259dc729/sdxl_models/image_encoder/model.safetensors|657723e09f46a7c3957df651601029f66b1748afb12b419816330f16ed45d64d"
   # anime-segmentation ISNet-IS (SkyTNT, Apache-2.0), for continuing a cut-off subject
   "$SEG_DIR/isnetis.onnx|$HF/skytnt/anime-seg/resolve/493cb60893f47441b26ec4fb9a306bce9e342982/isnetis.onnx|f15622d853e8260172812b657053460e20806f04b9e05147d49af7bed31a6e99"
   # WD EVA02-Large Tagger v3 (SmilingWolf, Apache-2.0): what surrounds the subject, for PQM (V.2)
   "$TAGGER_DIR/model.onnx|$HF/SmilingWolf/wd-eva02-large-tagger-v3/resolve/b25b82a03f7282e41aa2f257a52c7583b710bd1c/model.onnx|9e768793060c7939b277ccb382783e8670e8a042d29d77aa736be0c8cc898bfc"
   "$TAGGER_DIR/selected_tags.csv|$HF/SmilingWolf/wd-eva02-large-tagger-v3/resolve/b25b82a03f7282e41aa2f257a52c7583b710bd1c/selected_tags.csv|298633d94d0031d2081c0893f29c82eab7f0df00b08483ba8f29d1e979441217"
 )
-# What `restart` waits for Forge to list: the ControlNets the default method uses.
+# The fill's checkpoint (0.5.0): Waifu-Inpaint-XL, WAI-illustrious v14 v-pred with a
+# 9-channel inpainting input (ShinoharaHare). Gated: needs HF_TOKEN with access granted.
+CHECKPOINT="$FORGE_DIR/models/Stable-diffusion/Waifu-Inpaint-XL.safetensors|$HF/ShinoharaHare/Waifu-Inpaint-XL/resolve/a33e08f2ce957d0bd9974edddbe70fcd9b8f1680/Waifu-Inpaint-XL.safetensors|7e9ce3a86deaf624baac9959bff5cd3181728a25c44410b45ae3965ee53981dc"
+# --method noob (V.1's fill), opt-in since 0.5.0:
+NOOB=(
+  # NoobAI Inpainting ControlNet, fp16 (Acly's copy of Wenaka_'s; fair-ai-public-license-1.0-sd)
+  "$CN/noobaiInpainting_v10.fp16.safetensors|$HF/Acly/NoobAI-Inpainting/resolve/7341925b3346eb48dcac4dd4049cdb5bf2afd472/noobaiInpainting_v10.fp16.safetensors|8b3c2155ec8a49b43a8a32dac39a21b8c09ea60a7afaffe3c7a6fb51313a45d6"
+  # NoobAI IP-Adapter MARK1, the reference model Krita AI Diffusion uses for Illustrious
+  "$CN/noobIPAMARK1_mark1.safetensors|$HF/r3gm/noob-ipa/resolve/534fdd8fb5a221d67937d5495febd2560a1d395e/model_G/noobIPAMARK1_mark1.safetensors|5cdb6a00be1b12579745b5bed0c7b83f0869073d8a864fa8cd50a9356601919a"
+  # CLIP-ViT-bigG, under the name Forge's "CLIP-ViT-bigG (IPAdapter)" preprocessor looks for
+  "$PRE/CLIP-ViT-bigG.safetensors|$HF/h94/IP-Adapter/resolve/018e402774aeeddd60609b4ecdb7e298259dc729/sdxl_models/image_encoder/model.safetensors|657723e09f46a7c3957df651601029f66b1748afb12b419816330f16ed45d64d"
+)
+# What `restart` waits for Forge to list: the ControlNets --method noob uses.
 CONTROLNETS=(noobaiInpainting noobIPAMARK1)
 # ControlNet Union SDXL ProMax: NaN (fp16) or noise (bf16) in Forge Neo as pinned. Opt-in.
 PROMAX="$CN/controlnet-union-sdxl-promax.safetensors|$HF/xinsir/controlnet-union-sdxl-1.0/resolve/801a4a3fa3d4c936f4feea95b98607bc6726f80c/diffusion_pytorch_model_promax.safetensors|9fae2e50cb431bfcbe05822b59ec2228df545ef27f711dea8949e9f4ed9f7cdc"
@@ -56,8 +69,10 @@ mkdir -p "$VENVS"
 command -v uv >/dev/null || pip install -q uv
 export UV_LINK_MODE=copy
 
-fetch() {  # fetch "dest|url|sha256": download unless already there and verified
+fetch() {  # fetch "dest|url|sha256" [header]: download unless already there and verified
   IFS='|' read -r dest url sha <<<"$1"
+  local auth=()
+  [ -n "${2:-}" ] && auth=(-H "$2")
   mkdir -p "$(dirname "$dest")"
   if echo "$sha  $dest" | sha256sum -c --quiet - >/dev/null 2>&1; then
     echo "have $(basename "$dest")"; return
@@ -67,7 +82,7 @@ fetch() {  # fetch "dest|url|sha256": download unless already there and verified
   # (outpaint round 1); curl resumes the .part, and a bad hash starts it over.
   local try
   for try in 1 2 3; do
-    curl -sSL --fail --retry 5 --retry-all-errors --retry-delay 3 -C - -o "$dest.part" "$url" \
+    curl -sSL --fail --retry 5 --retry-all-errors --retry-delay 3 -C - "${auth[@]}" -o "$dest.part" "$url" \
       && echo "$sha  $dest.part" | sha256sum -c --quiet - && break
     echo "fetch $(basename "$dest") try $try failed"
     rm -f "$dest.part"
@@ -118,8 +133,25 @@ EOF
 }
 
 models() {
-  # Fetched and verified here; Forge sees the ControlNets after `restart`.
   for m in "${MODELS[@]}"; do fetch "$m"; done
+}
+
+checkpoint() {
+  # For a pod set up by hand: PQM fetches the checkpoint itself, with the user's token.
+  [ -n "${HF_TOKEN:-}" ] || { echo "checkpoint: HF_TOKEN is not set (Waifu-Inpaint-XL is gated)"; exit 7; }
+  code=$(curl -s -o /dev/null -w '%{http_code}' -I -H "Authorization: Bearer $HF_TOKEN" \
+           "$(cut -d'|' -f2 <<<"$CHECKPOINT")")
+  case "$code" in
+    401|403) echo "checkpoint: Hugging Face answered $code -- request access to" \
+                  "ShinoharaHare/Waifu-Inpaint-XL with the token's account"; exit 7 ;;
+  esac
+  fetch "$CHECKPOINT" "Authorization: Bearer $HF_TOKEN"
+  curl -s -X POST "$FORGE_URL/sdapi/v1/refresh-checkpoints" >/dev/null
+}
+
+noob() {
+  for m in "${NOOB[@]}"; do fetch "$m"; done
+  restart
 }
 
 restart() {
@@ -156,14 +188,12 @@ verify() {
     IFS='|' read -r dest _url sha <<<"$m"
     echo "$sha  $dest" | sha256sum -c --quiet -
   done
-  listed noobaiInpainting && listed noobIPAMARK1
   "$VENVS/vr180/bin/python" -c "import sys; sys.path.insert(0, '$VR180_DIR'); from vr180.tagger import Tagger; t = Tagger('$TAGGER_DIR'); print('tagger', len(t.names), 'tags')"
-  curl -sf "$FORGE_URL/controlnet/module_list" | grep -q "CLIP-ViT-bigG (IPAdapter)"
 }
 
 case "${1:-all}" in
-  companion|stereo360|models|moge|restart|promax|verify) "$1" ;;
-  all) companion; stereo360; models; moge; restart; verify ;;
-  *) echo "usage: $0 companion|stereo360|models|moge|restart|promax|verify|all"; exit 2 ;;
+  companion|stereo360|models|moge|verify|checkpoint|noob|restart|promax) "$1" ;;
+  all) companion; stereo360; models; moge; verify; checkpoint ;;
+  *) echo "usage: $0 companion|stereo360|models|moge|verify|checkpoint|noob|restart|promax|all"; exit 2 ;;
 esac
 echo "SETUP ${1:-all} OK"

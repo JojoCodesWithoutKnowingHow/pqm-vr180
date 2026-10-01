@@ -118,9 +118,14 @@ def test_the_restart_finds_forge_by_its_argv_and_never_itself():
     assert not mod.is_launch(["grep", "launch.py"])
 
 
-def test_pod_setup_pins_the_tagger_and_restarts_before_verifying():
+def test_pod_setup_pins_the_tagger_and_the_checkpoint():
     text = (HERE / "setup" / "pod_setup.sh").read_bytes().decode()
     assert "\r" not in text, "a CRLF script dies on the pod (V.1)"
     assert "wd-eva02-large-tagger-v3/resolve/b25b82a03f7282e41aa2f257a52c7583b710bd1c" in text
-    assert "all) companion; stereo360; models; moge; restart; verify ;;" in text
+    # 0.5.0: no ControlNet by default, so no restart; the gated checkpoint last, by hand only.
+    assert "all) companion; stereo360; models; moge; verify; checkpoint ;;" in text
+    assert ("Waifu-Inpaint-XL/resolve/a33e08f2ce957d0bd9974edddbe70fcd9b8f1680/"
+            "Waifu-Inpaint-XL.safetensors|7e9ce3a86deaf624baac9959bff5cd3181728a25c44410b45ae3965ee53981dc"
+            in text)
+    assert "noob() {\n  for m in \"${NOOB[@]}\"; do fetch \"$m\"; done\n  restart\n}" in text
     assert 'VR180_DIR=${VR180_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}' in text

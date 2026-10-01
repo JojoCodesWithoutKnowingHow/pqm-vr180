@@ -6,6 +6,8 @@ another lake instead of the ground, because every view was prompted "scenery".
 """
 from __future__ import annotations
 
+import re
+
 QUALITY = "masterpiece, best quality, amazing quality, very aesthetic, absurdres"
 #: What no view wants, and what views that are not continuing the subject add.
 BASE_NEGATIVE = ("text, watermark, signature, frame, border, picture frame, lowres, "
@@ -121,14 +123,34 @@ def view_negative(base: str, where: str | None, pitch: float) -> str:
     return base + ", " + other
 
 
+#: The source's LoRA calls (``--loras``, 0.5.0), added to every prompt that draws
+#: her -- :func:`subject_prompt` builds each of them (the extension, the layout's
+#: full prompt, ADetailer, the seam repaint across her) -- and to no scenery-only
+#: view, which a character LoRA would fill with her.
+HER_LORAS: tuple = ()
+_LORA_CALL = re.compile(r"<(?:lora|lyco):[^<>:]+(?::-?\d+(?:\.\d+)?){0,2}>", re.IGNORECASE)
+
+
+def lora_calls(text: str) -> tuple:
+    """The ``<lora:name:w>`` / ``<lyco:...>`` calls in ``text``, in order, once each.
+    Anything else in it is an error: ``--loras`` carries calls, not prompt words."""
+    text = (text or "").strip()
+    calls = _LORA_CALL.findall(text)
+    rest = _LORA_CALL.sub("", text).replace(",", " ").strip()
+    if rest:
+        raise ValueError("--loras takes <lora:name:weight> calls only, not %r" % rest[:80])
+    return tuple(dict.fromkeys(calls))
+
+
 def subject_prompt(subject_tags: list[str], fill_tags: list[str], where: str | None,
                    pitch: float, quality: str = QUALITY) -> str:
     """A view that continues a subject the frame cut off: the subject's own tags
-    first, then the surroundings for this direction, never "no humans"."""
+    first, then the surroundings for this direction, never "no humans"; then her
+    LoRA calls (:data:`HER_LORAS`)."""
     rest = view_prompt(fill_tags, where, pitch, quality="").split(", ")
     rest = [t for t in rest if t and t not in ("no humans", "scenery")]
     words = list(dict.fromkeys(list(subject_tags) + rest))
-    return ", ".join(([quality] if quality else []) + words)
+    return ", ".join(([quality] if quality else []) + words + list(HER_LORAS))
 
 
 def minimal_prompt(where: str | None, pitch: float, quality: str = QUALITY) -> str:

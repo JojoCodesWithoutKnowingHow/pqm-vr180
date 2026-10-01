@@ -107,6 +107,33 @@ class Forge:
             names.append(m.get("title", "").split(" [")[0])
         return [n for n in names if n]
 
+    def loras(self) -> set[str]:
+        """Every name a ``<lora:...>`` call can use for each LoRA Forge lists: its
+        name and its alias, case-folded."""
+        try:
+            self._call("POST", "/sdapi/v1/refresh-loras", tries=1)
+        except (ForgeError, ValueError):
+            pass   # an older Forge without the route lists what it found at start
+        names = set()
+        for m in self._call("GET", "/sdapi/v1/loras"):
+            for key in ("name", "alias"):
+                if m.get(key):
+                    names.add(str(m[key]).casefold())
+        return names
+
+    def missing_loras(self, calls) -> list[str]:
+        """The calls whose file Forge does not list. Forge skips such a call with a
+        warning in its own log only, so a picture would lose her LoRA silently."""
+        if not calls:
+            return []
+        have = self.loras()
+        out = []
+        for call in calls:
+            name = call.strip("<>").split(":")[1]
+            if name.casefold() not in have:
+                out.append("LoRA %r is not in Forge's list" % name)
+        return out
+
     def cn_models(self) -> list[str]:
         return list(self._call("GET", "/controlnet/model_list").get("model_list", []))
 
