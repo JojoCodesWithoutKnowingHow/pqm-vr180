@@ -1079,9 +1079,12 @@ def test_forge_touch_mask_weight_only_when_set_and_fills_get_full(monkeypatch):
     assert sent[0]["override_settings"]["inpainting_mask_weight"] == 0.0
     assert sent[1]["override_settings"]["inpainting_mask_weight"] == 1.0
     sent.clear()
-    forge.Forge().inpaint(img, m, "p", "n", 1, forge.Settings(checkpoint="c", method="plain"),
-                          touch_up=True)
-    assert "inpainting_mask_weight" not in sent[0]["override_settings"]
+    # Unset: still sent, as 1.0 -- Forge keeps an override after a call (r44 ran at
+    # r43's leftover 0.0).
+    plain = forge.Settings(checkpoint="c", method="plain")
+    forge.Forge().inpaint(img, m, "p", "n", 1, plain, touch_up=True)
+    forge.Forge().inpaint(img, m, "p", "n", 1, plain)
+    assert all(p["override_settings"]["inpainting_mask_weight"] == 1.0 for p in sent)
 
 
 def test_cli_inner_seam_inner_reaches_the_repaint(tmp_path, monkeypatch):
