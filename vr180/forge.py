@@ -67,6 +67,12 @@ class Settings:
     mask_blur: int = 8
     cn_weight: float = 1.0
     cn_end: float = 1.0
+    #: Round 39: with an inpainting (9-channel) checkpoint, Forge's "Inpainting
+    #: Conditioning Mask Strength" for the touch-up passes (seam repaints, the
+    #: refine, ADetailer); a fill always sends 1.0. At 1.0 such a model is told
+    #: the masked area is grey while asked to keep most of it, and draws grey
+    #: lines and haze (r37-38, Waifu-Inpaint-XL). None: never sent.
+    touch_mask_weight: float | None = None
 
 
 class Forge:
@@ -151,7 +157,10 @@ class Forge:
             "inpaint_full_res": False, "inpainting_mask_invert": 0,
             "width": w, "height": h, "steps": steps or s.steps, "cfg_scale": s.cfg,
             "sampler_name": s.sampler, "scheduler": s.scheduler, "seed": seed,
-            "override_settings": {"sd_model_checkpoint": s.checkpoint},
+            "override_settings": dict(
+                {"sd_model_checkpoint": s.checkpoint},
+                **({} if s.touch_mask_weight is None else
+                   {"inpainting_mask_weight": s.touch_mask_weight if touch_up else 1.0})),
             "override_settings_restore_afterwards": False,
             "send_images": True, "save_images": False,
         }

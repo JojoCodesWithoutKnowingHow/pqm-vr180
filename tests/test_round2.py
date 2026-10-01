@@ -1058,3 +1058,27 @@ def test_cli_layout_soft_reaches_only_the_layout_call(tmp_path, monkeypatch):
     assert rc == 0
     assert fake.calls[0]["soft"] and fake.calls[0]["mask_blur"] == 16
     assert not any(c["soft"] for c in fake.calls[1:])
+
+
+def test_forge_touch_mask_weight_only_when_set_and_fills_get_full(monkeypatch):
+    # Round 39: the touch-up passes send the set mask strength; a fill sends 1.0.
+    from vr180 import forge
+    sent = []
+
+    def call(self, method, path, payload=None, tries=3):
+        sent.append(payload)
+        from vr180.forge import b64png
+        return {"images": [b64png(np.full((64, 64, 3), 128, np.uint8))]}
+    monkeypatch.setattr(forge.Forge, "_call", call)
+    img = np.full((64, 64, 3), 128, np.uint8)
+    m = np.zeros((64, 64), np.uint8)
+    m[:, 32:] = 255
+    s = forge.Settings(checkpoint="c", method="plain", touch_mask_weight=0.0)
+    forge.Forge().inpaint(img, m, "p", "n", 1, s, touch_up=True, denoise=0.4)
+    forge.Forge().inpaint(img, m, "p", "n", 1, s)
+    assert sent[0]["override_settings"]["inpainting_mask_weight"] == 0.0
+    assert sent[1]["override_settings"]["inpainting_mask_weight"] == 1.0
+    sent.clear()
+    forge.Forge().inpaint(img, m, "p", "n", 1, forge.Settings(checkpoint="c", method="plain"),
+                          touch_up=True)
+    assert "inpainting_mask_weight" not in sent[0]["override_settings"]

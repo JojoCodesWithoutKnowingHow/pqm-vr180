@@ -161,6 +161,10 @@ def parse(argv=None):
                    help="the source's pose and framing words (e.g. 'sitting, crossed legs, "
                         "cowboy shot'); with --extend-regional they go into her region's prompt "
                         "so it knows where her body ends (round 7)")
+    p.add_argument("--touch-mask-weight", type=float, default=None, metavar="W",
+                   help="round 39, with an inpainting (9-channel) checkpoint: Forge's Inpainting "
+                        "Conditioning Mask Strength for the touch-up passes (0: they see the "
+                        "image, not a grey hole); fills send 1.0 (r37-38: grey lines and haze)")
     p.add_argument("--layout-soft", action="store_true",
                    help="round 36: the layout's generation with Forge's Soft Inpainting, "
                         "the transition as wide as --layout-mask-blur (r30-34: with the mask "
@@ -303,7 +307,7 @@ def main(argv=None) -> int:
                        ipa_model=a.ipa_model if a.reference and a.method == "noob" else "",
                        ipa_weight=a.ipa_weight,
                        steps=a.steps, cfg=a.cfg, sampler=a.sampler, scheduler=a.scheduler,
-                       denoise=denoise)
+                       denoise=denoise, touch_mask_weight=a.touch_mask_weight)
     missing = f.resolve(s)
     segment = None
     if subject_tags or a.long_side in ("shot", "camera"):
