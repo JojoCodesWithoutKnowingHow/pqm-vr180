@@ -165,6 +165,10 @@ def parse(argv=None):
                    help="round 39, with an inpainting (9-channel) checkpoint: Forge's Inpainting "
                         "Conditioning Mask Strength for the touch-up passes (0: they see the "
                         "image, not a grey hole); fills send 1.0 (r37-38: grey lines and haze)")
+    p.add_argument("--touch-mask-weight-j", type=float, default=None, metavar="W",
+                   help="round 48, with --auto-pipeline: --touch-mask-weight W only when the "
+                        "pipeline chosen is J (r46: at 0 Yamato's grey border went, but the "
+                        "L images got a hard border at their frame)")
     p.add_argument("--layout-soft", action="store_true",
                    help="round 36: the layout's generation with Forge's Soft Inpainting, "
                         "the transition as wide as --layout-mask-blur (r30-34: with the mask "
@@ -444,6 +448,9 @@ def main(argv=None) -> int:
         else:
             a.extend_in_layout, a.layout_full_prompt, a.layout_owns_scenery = False, False, True
             a.adetail = 0.0
+            if a.touch_mask_weight_j is not None:
+                s.touch_mask_weight = a.touch_mask_weight_j
+                extra_log["auto_pipeline"]["touch_mask_weight"] = a.touch_mask_weight_j
             a.extend_side = a.extend_side or 1.0
     if a.extend_in_layout and seg_src is not None and a.layout == "fisheye":
         pano0, m0, _f = centred(src)

@@ -1181,3 +1181,53 @@ def test_cli_trim_source_crops_the_border_and_keeps_its_angular_size(tmp_path, m
     f = grow.focal(416, 608, 60.0)
     want = math.degrees(2 * math.atan(((608 - 32) / 2) / f))
     assert abs(tr["long_side"] - want) < 0.01 and tr["long_side"] < 60.0
+
+
+@pytest.mark.parametrize("reaches", [False, True])
+def test_cli_touch_mask_weight_j_only_on_the_j_path(tmp_path, monkeypatch, reaches):
+    # Round 48: the touch-up mask strength set only when auto chooses J.
+    from vr180 import cli, forge, grow, subject
+    src = checker(416, 608)
+    Image.fromarray(src).save(tmp_path / "src.png")
+    seg_model = tmp_path / "seg.onnx"
+    seg_model.write_bytes(b"x")
+    fake = ColourForge()
+
+    class FakeSeg:
+        def __init__(self, path):
+            self.fn = her_segment(src)
+
+        def __call__(self, rgb, threshold=0.5):
+            return self.fn(rgb, threshold)
+
+    real = grow.extend_side
+
+    def extend_side(*args, **kw):
+        g = real(*args, **kw)
+        if g is not None:
+            for p_ in g.log.get("passes", []):
+                p_["body_reaches_edge"] = reaches
+        return g
+
+    seen = []
+    monkeypatch.setattr(grow, "extend_side", extend_side)
+    monkeypatch.setattr(subject, "Segmenter", FakeSeg)
+    monkeypatch.setattr(forge.Forge, "resolve", lambda self, s: [])
+
+    def inpaint(self, image, mask, prompt, negative, seed, s, **kw):
+        seen.append(s.touch_mask_weight)
+        return fake(image, mask, prompt, negative, seed, **kw)
+    monkeypatch.setattr(forge.Forge, "inpaint", inpaint)
+    rc = cli.main([str(tmp_path / "src.png"), "-o", str(tmp_path / "o_180_LR.jpg"), "--checkpoint",
+                   "c", "--tags", "indoors, room", "--subject-tags", "1girl, skirt",
+                   "--subject-framing", "sitting", "--long-side", "60",
+                   "--width", "1024", "--view-px", "256", "--segment-model", str(seg_model),
+                   "--pano-only", "--join", "hard", "--auto-pipeline", "--extend-side", "0.6",
+                   "--extend-refine", "0.35", "--layout", "fisheye", "--layout-px", "256",
+                   "--layout-hires", "512", "--compose", "0", "--seam-repaint", "0.4",
+                   "--soften-rim", "0", "--touch-mask-weight-j", "0"])
+    assert rc == 0
+    if reaches:                                  # L: never set
+        assert all(w is None for w in seen)
+    else:                                        # J: set once chosen
+        assert seen[-1] == 0.0
