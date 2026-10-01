@@ -244,6 +244,11 @@ def parse(argv=None):
     p.add_argument("--keep-threshold", type=float, default=0.15,
                    help="with --layout-owns-scenery: the segmenter threshold for what counts as "
                         "her inside the extension's painted areas")
+    p.add_argument("--source-feather", type=int, default=0, metavar="PX",
+                   help="round 42: cross-fade the original frame's outer PX pano pixels from "
+                        "the layout's version at its edge to the exact source PX in (with "
+                        "--layout-mask-grow > 0 the layout redrew that rim to meet the room); "
+                        "r41: the room's lines stepped at the frame")
     p.add_argument("--inner-seam-inner", type=int, default=8, metavar="PX",
                    help="round 41: how far the inner seam repaint reaches into the source "
                         "(the author, r40: with the grey gone the source's edge reads as a pane "
@@ -613,6 +618,9 @@ def main(argv=None) -> int:
                     grow_segment=grow_segment, layout=lay, place=place)
     src_mask = orig_mask if orig_mask is not None else r.source_mask
     seam = {}
+    if a.source_feather > 0 and lay is not None:
+        r.pano = post.source_feather(r.pano, src_mask > 0, lay, a.source_feather)
+        seam["source_feather_px"] = a.source_feather
     if a.seam_repaint > 0:
         if subject_tags:
             sp = prompts.subject_prompt(list(subject_tags), tags, where, 0.0, a.quality)

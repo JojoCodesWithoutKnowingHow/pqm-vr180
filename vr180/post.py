@@ -56,6 +56,22 @@ def detail_match(pano: np.ndarray, source: np.ndarray, px: int = 24,
     return out.round().astype(np.uint8), amount
 
 
+def source_feather(pano: np.ndarray, source: np.ndarray, layout: np.ndarray,
+                   px: int) -> np.ndarray:
+    """Round 42 (the author, r41: a hard line round the original frame). The
+    panorama keeps the source exact up to its edge (widen never blends it), so
+    the room's lines step there. Cross-fade the source's outer ``px`` pixels
+    from ``layout`` -- which, with the layout's mask reaching into the source,
+    holds a rim the inpainting model redrew to meet the room -- at the edge to
+    the exact source ``px`` in."""
+    if px <= 0:
+        return pano
+    d = cv2.distanceTransform(source.astype(np.uint8), cv2.DIST_L2, 5)
+    w = np.clip(d / px, 0.0, 1.0)[..., None]
+    out = pano.astype(np.float32) * w + layout.astype(np.float32) * (1 - w)
+    return np.where(source[..., None], out.round(), pano).astype(np.uint8)
+
+
 def soften_rim(pano: np.ndarray, source: np.ndarray, px: int = 12,
                sigma: float = 1.5) -> np.ndarray:
     """Blend the source's outermost ``px`` pixels toward a blurred copy: fully at

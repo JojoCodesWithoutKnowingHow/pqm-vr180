@@ -1122,3 +1122,18 @@ def test_cli_inner_seam_inner_reaches_the_repaint(tmp_path, monkeypatch):
                    "--soften-rim", "0", "--inner-seam-inner", "48", "--inner-seam-outer", "48"])
     assert rc == 0
     assert any(k.get("inner") == 48 and k.get("outer") == 48 for k in seen)
+
+
+def test_source_feather_fades_the_frame_into_the_layout():
+    # Round 42: at the frame's edge the layout's version, the exact source px in.
+    from vr180 import post
+    pano = np.full((200, 300, 3), 200, np.uint8)
+    lay = np.full((200, 300, 3), 40, np.uint8)
+    src = np.zeros((200, 300), bool)
+    src[50:150, 100:200] = True
+    out = post.source_feather(pano, src, lay, 20)
+    assert out[100, 100, 0] < 60                      # the edge: the layout's
+    assert out[100, 150, 0] == 200                    # deep inside: the source exact
+    assert 60 < out[100, 110, 0] < 200                # between: a blend
+    assert (out[~src] == pano[~src]).all()            # outside the frame untouched
+    assert (post.source_feather(pano, src, lay, 0) == pano).all()
