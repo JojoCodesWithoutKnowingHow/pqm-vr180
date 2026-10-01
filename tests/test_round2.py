@@ -1247,3 +1247,21 @@ def test_tone_match_pulls_the_outpaint_toward_the_source_at_the_frame():
     assert abs(near[0] - 100) < 30 and near[0] < 150             # pulled toward the source
     assert (out[150, 330] == pano[150, 330]).all()               # beyond reach: unchanged
     assert (post.tone_match(pano, src, 0) == pano).all()
+
+
+def test_layout_hires_overlap_reaches_into_the_source():
+    # Round 51: the hires tiles' mask reaches into the known source.
+    from vr180 import layout
+    src = checker(416, 608)
+    pano, mask, _f = sphere.place(src, 1024, 60.0)
+    masks = {}
+    for ov in (0, 8):
+        seen = []
+
+        def fake(image, m, prompt, negative, seed, **kw):
+            seen.append((m > 0).copy())
+            return image
+        layout.make_layout(pano, mask > 0, ["room"], None, fake, seed=1, S=256, hires=512,
+                           hires_overlap=ov)
+        masks[ov] = sum(int(m.sum()) for m in seen[1:])           # the hires tiles
+    assert masks[8] > masks[0]

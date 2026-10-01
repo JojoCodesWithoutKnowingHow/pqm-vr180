@@ -81,7 +81,7 @@ def make_layout(pano: np.ndarray, known: np.ndarray, fill_tags: list[str], where
                 hires_denoise: float = 0.4, return_fisheye: bool = False,
                 region: tuple | None = None, full_prompt: str | None = None,
                 full_negative: str | None = None, mask_grow: int = 2,
-                mask_blur: int | None = None, soft: bool = False):
+                mask_blur: int | None = None, soft: bool = False, hires_overlap: int = 0):
     """(layout equirect the size of ``pano``, log). Outside the fisheye's disc the
     layout is the disc's edge carried outward and blurred, so a view there still
     starts from something of the scene's colour.
@@ -142,6 +142,12 @@ def make_layout(pano: np.ndarray, known: np.ndarray, fill_tags: list[str], where
         big = cv2.resize(gen, (hires, hires), interpolation=cv2.INTER_LANCZOS4)
         keep = unknown if region is None else unknown & ~(cv2.dilate(
             region[1].astype(np.uint8), np.ones((9, 9), np.uint8)) > 0)
+        if hires_overlap > 0:
+            # Round 51: the tiles fade to zero at their mask's edge, so the room's
+            # strip against the frame stayed at the pre-hires softness; reaching
+            # into the source (pasted back over afterwards) puts the fade there.
+            k = 2 * hires_overlap + 1
+            keep = cv2.dilate(keep.astype(np.uint8), np.ones((k, k), np.uint8)) > 0
         bmask = cv2.resize(keep.astype(np.uint8), (hires, hires),
                            interpolation=cv2.INTER_NEAREST) > 0
         tiles = refine(big, bmask, inpaint, prompt, hires_negative, seed + 1, hires_denoise,

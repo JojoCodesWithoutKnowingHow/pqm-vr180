@@ -248,6 +248,9 @@ def parse(argv=None):
     p.add_argument("--keep-threshold", type=float, default=0.15,
                    help="with --layout-owns-scenery: the segmenter threshold for what counts as "
                         "her inside the extension's painted areas")
+    p.add_argument("--layout-hires-overlap", type=int, default=0, metavar="PX",
+                   help="round 51: the layout's hires refine reaches PX layout px into the "
+                        "source, so its fade falls there, not on the room against the frame")
     p.add_argument("--tone-match", type=int, default=0, metavar="PX",
                    help="round 49: shift the generated area's low-frequency colour toward the "
                         "original's at its frame, fading out over PX pano pixels (the author: "
@@ -412,6 +415,7 @@ def main(argv=None) -> int:
     seg_src = segment(src) if (segment is not None and subject_tags) else None
     cut = widen._cut_edges(seg_src) if seg_src is not None else []
     lay_kw = dict(mask_grow=a.layout_mask_grow, mask_blur=a.layout_mask_blur, soft=a.layout_soft,
+                  hires_overlap=a.layout_hires_overlap,
                   max_deg=a.layout_deg, S=a.layout_px, quality=a.quality, reference=ref,
                   steps=a.steps, work=work, strong=a.layout_strong, hires=a.layout_hires,
                   hires_denoise=a.layout_hires_denoise)
