@@ -22,11 +22,12 @@ class ColourForge:
         self.calls = []
 
     def __call__(self, image, mask, prompt, negative, seed, control=None, reference=None,
-                 steps=None, denoise=None, touch_up=False, regions=None, mask_blur=None):
+                 steps=None, denoise=None, touch_up=False, regions=None, mask_blur=None,
+                 soft=False):
         her = "no humans" not in prompt
         green_in = (image[..., 1] > 200) & (image[..., 0] < 40) & (image[..., 2] < 40)
         self.calls.append({"her": her, "prompt": prompt, "negative": negative,
-                           "mask_blur": mask_blur, "denoise": denoise, "touch_up": touch_up,
+                           "mask_blur": mask_blur, "soft": soft, "denoise": denoise, "touch_up": touch_up,
                            "control": control is not None,
                            "repaints_body": bool((green_in & (mask > 0)).any()),
                            "masked": float((mask > 0).mean()), "shape": image.shape[:2],

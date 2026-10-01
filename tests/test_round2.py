@@ -1002,3 +1002,59 @@ def test_joint_pass_joins_only_her_body_near_the_source_edge():
     assert not (changed & known).any()                               # the source fixed
     assert changed[ys.max() + 2:ys.max() + reach - 10, cx - 4:cx + 4].all()   # the joint
     assert not changed[ys.max() + reach + 30:, :].any()              # her leg further out fixed
+
+
+def test_forge_soft_inpainting_payload(monkeypatch):
+    # Round 36: Soft Inpainting goes to Forge as its built-in script, with its defaults.
+    from vr180 import forge
+    sent = {}
+
+    def call(self, method, path, payload=None, tries=3):
+        sent.update(payload)
+        from vr180.forge import b64png
+        return {"images": [b64png(np.full((64, 64, 3), 128, np.uint8))]}
+    monkeypatch.setattr(forge.Forge, "_call", call)
+    s = forge.Settings(checkpoint="c", method="plain")
+    img = np.full((64, 64, 3), 128, np.uint8)
+    m = np.zeros((64, 64), np.uint8)
+    m[:, 32:] = 255
+    forge.Forge().inpaint(img, m, "p", "n", 1, s, soft=True, mask_blur=16)
+    assert sent["mask_blur"] == 16
+    assert sent["alwayson_scripts"]["soft inpainting"]["args"] == [True, 1.0, 0.5, 4.0, 0.0, 0.5, 2.0]
+    sent.clear()
+    forge.Forge().inpaint(img, m, "p", "n", 1, s)
+    assert "alwayson_scripts" not in sent
+
+
+def test_cli_layout_soft_reaches_only_the_layout_call(tmp_path, monkeypatch):
+    from vr180 import cli, forge, subject
+    src = checker(416, 608)
+    Image.fromarray(src).save(tmp_path / "src.png")
+    seg_model = tmp_path / "seg.onnx"
+    seg_model.write_bytes(b"x")
+    fake = ColourForge()
+
+    class FakeSeg:
+        def __init__(self, path):
+            self.fn = her_segment(src)
+
+        def __call__(self, rgb, threshold=0.5):
+            return self.fn(rgb, threshold)
+
+    monkeypatch.setattr(subject, "Segmenter", FakeSeg)
+    monkeypatch.setattr(forge.Forge, "resolve", lambda self, s: [])
+    monkeypatch.setattr(forge.Forge, "inpaint",
+                        lambda self, image, mask, prompt, negative, seed, s, **kw:
+                        fake(image, mask, prompt, negative, seed, **kw))
+    rc = cli.main([str(tmp_path / "src.png"), "-o", str(tmp_path / "o_180_LR.jpg"), "--checkpoint",
+                   "c", "--tags", "indoors, room", "--subject-tags", "1girl, skirt",
+                   "--subject-framing", "sitting", "--long-side", "60",
+                   "--width", "1024", "--view-px", "256", "--segment-model", str(seg_model),
+                   "--pano-only", "--join", "hard", "--extend-in-layout", "--layout-full-prompt",
+                   "--layout-mask-grow", "0", "--layout-mask-blur", "16", "--layout-soft",
+                   "--extend-side", "0.6", "--layout", "fisheye", "--layout-px", "256",
+                   "--layout-hires", "512", "--compose", "0", "--seam-repaint", "0.4",
+                   "--soften-rim", "0", "--adetail", "0.27"])
+    assert rc == 0
+    assert fake.calls[0]["soft"] and fake.calls[0]["mask_blur"] == 16
+    assert not any(c["soft"] for c in fake.calls[1:])

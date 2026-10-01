@@ -161,6 +161,10 @@ def parse(argv=None):
                    help="the source's pose and framing words (e.g. 'sitting, crossed legs, "
                         "cowboy shot'); with --extend-regional they go into her region's prompt "
                         "so it knows where her body ends (round 7)")
+    p.add_argument("--layout-soft", action="store_true",
+                   help="round 36: the layout's generation with Forge's Soft Inpainting, "
+                        "the transition as wide as --layout-mask-blur (r30-34: with the mask "
+                        "exactly at the source's edge the bed's border showed)")
     p.add_argument("--layout-joint", type=int, default=0, metavar="PX",
                    help="round 34, after --layout-fine: on the fisheye at PX, only her body "
                         "within 250 canvas px of the source's edge is generated anew from a hole, "
@@ -313,10 +317,10 @@ def main(argv=None) -> int:
         return 2
 
     def inpaint(image, mask, prompt, negative, seed, control=None, reference=None, steps=None,
-                denoise=None, touch_up=False, regions=None, mask_blur=None):
+                denoise=None, touch_up=False, regions=None, mask_blur=None, soft=False):
         return f.inpaint(image, mask, prompt, negative, seed, s, control=control,
                          reference=reference, steps=steps, denoise=denoise, touch_up=touch_up,
-                         regions=regions, mask_blur=mask_blur)
+                         regions=regions, mask_blur=mask_blur, soft=soft)
 
     opt = widen.Options(width=a.width, target_deg=a.target,
                         max_new=a.max_new, seed=a.seed, quality=a.quality,
@@ -367,7 +371,7 @@ def main(argv=None) -> int:
     grown_g, silhouette = None, None
     seg_src = segment(src) if (segment is not None and subject_tags) else None
     cut = widen._cut_edges(seg_src) if seg_src is not None else []
-    lay_kw = dict(mask_grow=a.layout_mask_grow, mask_blur=a.layout_mask_blur,
+    lay_kw = dict(mask_grow=a.layout_mask_grow, mask_blur=a.layout_mask_blur, soft=a.layout_soft,
                   max_deg=a.layout_deg, S=a.layout_px, quality=a.quality, reference=ref,
                   steps=a.steps, work=work, strong=a.layout_strong, hires=a.layout_hires,
                   hires_denoise=a.layout_hires_denoise)

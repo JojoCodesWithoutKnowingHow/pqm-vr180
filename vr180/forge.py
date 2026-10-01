@@ -127,7 +127,8 @@ class Forge:
                 seed: int, s: Settings, control: np.ndarray | None = None,
                 reference: np.ndarray | None = None, steps: int | None = None,
                 denoise: float | None = None, touch_up: bool = False,
-                regions: list | None = None, mask_blur: int | None = None) -> np.ndarray:
+                regions: list | None = None, mask_blur: int | None = None,
+                soft: bool = False) -> np.ndarray:
         """``mask`` is uint8, 255 where to paint. ``control`` is the inpaint
         ControlNet's image (``noob``: the view with the hole pure black);
         ``reference`` the IP-Adapter's. ``denoise`` overrides the settings' for
@@ -187,6 +188,12 @@ class Forge:
             scripts["forge couple"] = {"args": [True, True, "Mask", "\n", None, "None", 1.0,
                                                 mapping, "off", False, False,
                                                 None, None, None, None, None, None]}
+        if soft:
+            # Forge Neo's built-in Soft Inpainting (round 36): the known and the new
+            # blended by a per-pixel strength over the blurred mask, not pasted at it.
+            # Its defaults: schedule bias 1, preservation 0.5, transition contrast
+            # 4, mask influence 0, difference threshold 0.5, difference contrast 2.
+            scripts["soft inpainting"] = {"args": [True, 1.0, 0.5, 4.0, 0.0, 0.5, 2.0]}
         if scripts:
             payload["alwayson_scripts"] = scripts
         r = self._call("POST", "/sdapi/v1/img2img", payload)
