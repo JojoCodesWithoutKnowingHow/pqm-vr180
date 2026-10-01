@@ -72,6 +72,35 @@ def source_feather(pano: np.ndarray, source: np.ndarray, layout: np.ndarray,
     return np.where(source[..., None], out.round(), pano).astype(np.uint8)
 
 
+def tone_match(pano: np.ndarray, source: np.ndarray, reach: int,
+               sigma: float | None = None) -> np.ndarray:
+    """Round 49 (the author: what remains is the lighting difference between the
+    original and the outpaint). The generated area's low-frequency colour is
+    shifted toward the source's at the frame -- fully at the frame, fading to
+    nothing ``reach`` px out; the source is not touched. Each side's local mean
+    colour is a normalised Gaussian blur (``sigma``, default reach / 3) over that
+    side's pixels only, so neither side's detail and neither side's colour bleeds
+    into the other's measure."""
+    if reach <= 0:
+        return pano
+    sigma = sigma or reach / 3.0
+    f = pano.astype(np.float32)
+    s = source.astype(np.float32)
+    g = 1.0 - s
+
+    def mean_of(mask):
+        num = cv2.GaussianBlur(f * mask[..., None], (0, 0), sigma)
+        den = cv2.GaussianBlur(mask, (0, 0), sigma)[..., None]
+        return num / np.maximum(den, 1e-4), den[..., 0]
+
+    src_mean, src_den = mean_of(s)
+    gen_mean, _gd = mean_of(g)
+    d = cv2.distanceTransform((~source).astype(np.uint8), cv2.DIST_L2, 5)
+    w = np.clip(1.0 - d / reach, 0.0, 1.0) * (src_den > 1e-3)
+    out = f + (w[..., None] * (src_mean - gen_mean)) * g[..., None]
+    return np.clip(out, 0, 255).round().astype(np.uint8)
+
+
 def soften_rim(pano: np.ndarray, source: np.ndarray, px: int = 12,
                sigma: float = 1.5) -> np.ndarray:
     """Blend the source's outermost ``px`` pixels toward a blurred copy: fully at

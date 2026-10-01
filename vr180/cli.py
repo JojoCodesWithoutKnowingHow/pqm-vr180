@@ -248,6 +248,10 @@ def parse(argv=None):
     p.add_argument("--keep-threshold", type=float, default=0.15,
                    help="with --layout-owns-scenery: the segmenter threshold for what counts as "
                         "her inside the extension's painted areas")
+    p.add_argument("--tone-match", type=int, default=0, metavar="PX",
+                   help="round 49: shift the generated area's low-frequency colour toward the "
+                        "original's at its frame, fading out over PX pano pixels (the author: "
+                        "the remaining issue is the lighting difference)")
     p.add_argument("--trim-source", type=int, default=0, metavar="PX",
                    help="round 43: drop the source's outer PX pixels on every side before "
                         "anything else, its placement scaled so the rest keeps its angular size "
@@ -644,6 +648,9 @@ def main(argv=None) -> int:
                     grow_segment=grow_segment, layout=lay, place=place)
     src_mask = orig_mask if orig_mask is not None else r.source_mask
     seam = {}
+    if a.tone_match > 0:
+        r.pano = post.tone_match(r.pano, src_mask > 0, a.tone_match)
+        seam["tone_match_px"] = a.tone_match
     if a.source_feather > 0 and lay is not None:
         r.pano = post.source_feather(r.pano, src_mask > 0, lay, a.source_feather)
         seam["source_feather_px"] = a.source_feather

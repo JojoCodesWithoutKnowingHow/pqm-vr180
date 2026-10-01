@@ -1231,3 +1231,19 @@ def test_cli_touch_mask_weight_j_only_on_the_j_path(tmp_path, monkeypatch, reach
         assert all(w is None for w in seen)
     else:                                        # J: set once chosen
         assert seen[-1] == 0.0
+
+
+def test_tone_match_pulls_the_outpaint_toward_the_source_at_the_frame():
+    # Round 49: near the frame the generated colour moves to the source's; far
+    # away and inside the source nothing changes.
+    from vr180 import post
+    pano = np.full((300, 400, 3), 160, np.uint8)
+    src = np.zeros((300, 400), bool)
+    src[100:200, 150:250] = True
+    pano[src] = (100, 110, 120)
+    out = post.tone_match(pano, src, 60)
+    assert (out[src] == pano[src]).all()                         # the source untouched
+    near = out[150, 253].astype(int)
+    assert abs(near[0] - 100) < 30 and near[0] < 150             # pulled toward the source
+    assert (out[150, 330] == pano[150, 330]).all()               # beyond reach: unchanged
+    assert (post.tone_match(pano, src, 0) == pano).all()
