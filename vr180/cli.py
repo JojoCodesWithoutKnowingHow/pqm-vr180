@@ -244,6 +244,12 @@ def parse(argv=None):
     p.add_argument("--keep-threshold", type=float, default=0.15,
                    help="with --layout-owns-scenery: the segmenter threshold for what counts as "
                         "her inside the extension's painted areas")
+    p.add_argument("--trim-source", type=int, default=0, metavar="PX",
+                   help="round 43: drop the source's outer PX pixels on every side before "
+                        "anything else, its placement scaled so the rest keeps its angular size "
+                        "(the author, r41: a black line along Fubuki's bed's top edge -- SDXL "
+                        "leaves a band of different tone at an image's borders, ~16 px, and "
+                        "every pass along the frame inks or hazes it)")
     p.add_argument("--source-feather", type=int, default=0, metavar="PX",
                    help="round 42: cross-fade the original frame's outer PX pano pixels from "
                         "the layout's version at its edge to the exact source PX in (with "
@@ -369,11 +375,24 @@ def main(argv=None) -> int:
     else:
         long_side, why = float(a.long_side), "given"
     print("placement: %.1f deg (%s)" % (long_side, why))
+    trim_log = None
+    if a.trim_source > 0:
+        t = int(a.trim_source)
+        f_full = grow.focal(w, h, long_side)
+        src = np.ascontiguousarray(src[t:h - t, t:w - t])
+        long_full = long_side
+        h, w = src.shape[:2]
+        long_side = math.degrees(2 * math.atan((max(w, h) / 2) / f_full))
+        trim_log = {"px": t, "size": [w, h], "long_side_full": round(long_full, 2),
+                    "long_side": round(long_side, 2)}
+        print("trim: %d px a side, %dx%d, long side %.2f deg" % (t, w, h, long_side))
     t0 = time.time()
     where = prompts.setting(tags)[0]
     ref = src if (a.reference and a.method == "noob") else None
     opt.long_side = long_side
     extra_log = {}
+    if trim_log is not None:
+        extra_log["trim"] = trim_log
     W = a.width
 
     def centred(img):

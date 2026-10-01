@@ -1137,3 +1137,44 @@ def test_source_feather_fades_the_frame_into_the_layout():
     assert 60 < out[100, 110, 0] < 200                # between: a blend
     assert (out[~src] == pano[~src]).all()            # outside the frame untouched
     assert (post.source_feather(pano, src, lay, 0) == pano).all()
+
+
+def test_cli_trim_source_crops_the_border_and_keeps_its_angular_size(tmp_path, monkeypatch):
+    # Round 43: the source's outer band dropped; the rest keeps its focal length.
+    import math
+    from vr180 import cli, forge, grow, subject
+    src = checker(416, 608)
+    Image.fromarray(src).save(tmp_path / "src.png")
+    seg_model = tmp_path / "seg.onnx"
+    seg_model.write_bytes(b"x")
+    fake = ColourForge()
+
+    class FakeSeg:
+        def __init__(self, path):
+            self.fn = None
+
+        def __call__(self, rgb, threshold=0.5):
+            if self.fn is None:
+                self.fn = her_segment(rgb)
+            return self.fn(rgb, threshold)
+
+    monkeypatch.setattr(subject, "Segmenter", FakeSeg)
+    monkeypatch.setattr(forge.Forge, "resolve", lambda self, s: [])
+    monkeypatch.setattr(forge.Forge, "inpaint",
+                        lambda self, image, mask, prompt, negative, seed, s, **kw:
+                        fake(image, mask, prompt, negative, seed, **kw))
+    rc = cli.main([str(tmp_path / "src.png"), "-o", str(tmp_path / "o_180_LR.jpg"), "--checkpoint",
+                   "c", "--tags", "indoors, room", "--subject-tags", "1girl, skirt",
+                   "--subject-framing", "sitting", "--long-side", "60", "--trim-source", "16",
+                   "--width", "1024", "--view-px", "256", "--segment-model", str(seg_model),
+                   "--pano-only", "--join", "hard", "--extend-in-layout", "--layout-full-prompt",
+                   "--extend-side", "0.6", "--layout", "fisheye", "--layout-px", "256",
+                   "--layout-hires", "512", "--compose", "0", "--seam-repaint", "0.4",
+                   "--soften-rim", "0"])
+    assert rc == 0
+    log = json.loads((tmp_path / "o_180_LR.work" / "log.json").read_text(encoding="utf-8"))
+    tr = log["trim"]
+    assert tr["size"] == [416 - 32, 608 - 32]
+    f = grow.focal(416, 608, 60.0)
+    want = math.degrees(2 * math.atan(((608 - 32) / 2) / f))
+    assert abs(tr["long_side"] - want) < 0.01 and tr["long_side"] < 60.0
